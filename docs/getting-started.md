@@ -125,9 +125,16 @@ cd $Env:ProgramFiles\containerd\
 # - cni bin_dir and conf_dir locations
 Get-Content config.toml
 
+# Optional step to add the binaries (containerd.exe, ctr.exe) in $env:Path
+$Path = [Environment]::GetEnvironmentVariable("PATH", "Machine") + [IO.Path]::PathSeparator + $PWD.Path
+[Environment]::SetEnvironmentVariable( "Path", $Path, "Machine")
+# reload path, so you don't have to open a new PS terminal later if needed
+$Env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+ 
 # Register and start service
 .\containerd.exe --register-service
 Start-Service containerd
+
 ```
 
 ## Interacting with containerd via CLI
