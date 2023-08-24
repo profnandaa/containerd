@@ -1,18 +1,15 @@
 name: CI
 on:
-  push:
-    branches:
-      - main
-      - "release/**"
+  # When added to a merge queue.
+  # See https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue#triggering-merge-group-checks-with-github-actions
+  merge_group:
   pull_request:
-    branches:
-      - main
-      - "release/**"
+    branches: ['main', 'release/**']
 
 env:
   # Go version we currently use to build containerd across all CI.
   # Note: don't forget to update `Binaries` step, as it contains the matrix of all supported Go versions.
-  GO_VERSION: "1.19.5"
+  GO_VERSION: "1.21.0"
 
 permissions: # added using https://github.com/step-security/secure-workflows
   contents: read
@@ -31,23 +28,18 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-20.04, macos-12, windows-2019]
+        os: [ubuntu-22.04, macos-12, windows-2019]
 
     steps:
-      - name: Install dependencies
-        if: matrix.os == 'ubuntu-20.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbtrfs-dev
-
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
 
       - uses: actions/checkout@v3
       - uses: golangci/golangci-lint-action@v3
         with:
-          version: v1.50.1
+          version: v1.52.2
           skip-cache: true
           args: --timeout=8m
 
@@ -56,13 +48,15 @@ jobs:
   #
   project:
     name: Project Checks
-    runs-on: ubuntu-20.04
+    if: github.repository == 'containerd/containerd'
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
 
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
 
       - uses: actions/checkout@v3
         with:
@@ -85,7 +79,7 @@ jobs:
   #
   protos:
     name: Protobuf
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
 
     defaults:
@@ -93,9 +87,10 @@ jobs:
         working-directory: src/github.com/containerd/containerd
 
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
 
       - uses: actions/checkout@v3
         with:
@@ -121,13 +116,14 @@ jobs:
 
   man:
     name: Manpages
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
 
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
       - uses: actions/checkout@v3
       - run: go install github.com/cpuguy83/go-md2man/v2@v2.0.2
       - run: make man
@@ -137,7 +133,7 @@ jobs:
   crossbuild:
     name: Crossbuild Binaries
     needs: [project, linters, protos, man]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -158,14 +154,15 @@ jobs:
             goarm: "7"
 
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
       - uses: actions/checkout@v3
       - run: |
           set -e -x
 
-          packages="libbtrfs-dev"
+          packages=""
           platform="${{matrix.goos}}/${{matrix.goarch}}"
           if [ -n "${{matrix.goarm}}" ]; then
             platform+="/v${{matrix.goarm}}"
@@ -206,39 +203,31 @@ jobs:
   binaries:
     name: Binaries
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     needs: [project, linters, protos, man]
 
     strategy:
       matrix:
-        os: [ubuntu-20.04, macos-12, windows-2019, windows-2022]
-        go-version: ["1.19.5", "1.18.10"]
+        os: [ubuntu-22.04, macos-12, windows-2019, windows-2022]
+        go-version: ["1.20.7", "1.21.0"]
     steps:
-      - name: Install dependencies
-        if: matrix.os == 'ubuntu-20.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbtrfs-dev
-
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ matrix.go-version }}
-
-      - name: Set env
-        shell: bash
-        run: |
-          echo "GOPATH=${{ github.workspace }}" >> $GITHUB_ENV
-          echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+          cache: false # see actions/setup-go#368
 
       - uses: actions/checkout@v3
-        with:
-          path: src/github.com/containerd/containerd
+
+      # NOTE(aznashwan): starting with Golang 1.21, the windows-2019 GitHub runner's
+      # builtin MinGW version leads to DLL loading errors during runtime.
+      - name: Upgrade MinGW on Windows 2019
+        if: matrix.os == 'windows-2019'
+        run: choco upgrade mingw
 
       - name: Make
         run: |
           make build
           make binaries
-        working-directory: src/github.com/containerd/containerd
 
   #
   # Integration and CRI tests
@@ -246,7 +235,7 @@ jobs:
   integration-windows:
     name: Windows Integration
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: 90
     needs: [project, linters, protos, man]
     env:
       GOTEST: gotestsum --
@@ -255,7 +244,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2019, windows-2022]
-        enable_cri_sandboxes: ["", "sandboxed"]
+        disable_cri_sandboxes: ["", "legacyCRI"]
 
     defaults:
       run:
@@ -263,9 +252,10 @@ jobs:
         working-directory: src/github.com/containerd/containerd
 
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
 
       - uses: actions/checkout@v3
         with:
@@ -281,9 +271,15 @@ jobs:
           echo "GOPATH=${{ github.workspace }}" >> $GITHUB_ENV
           echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
           echo "${{ github.workspace }}/src/github.com/containerd/containerd/bin" >> $GITHUB_PATH
-          echo "${{ github.workspace }}/src/github.com/kubernetes-sigs/cri-tools/build/bin" >> $GITHUB_PATH
+          echo "${{ github.workspace }}/src/github.com/kubernetes-sigs/cri-tools/build/bin/windows/amd64" >> $GITHUB_PATH
 
       - run: script/setup/install-dev-tools
+
+      # NOTE(aznashwan): starting with Golang 1.21, the windows-2019 GitHub runner's
+      # builtin MinGW version leads to DLL loading errors during runtime.
+      - name: Upgrade MinGW on Windows 2019
+        if: matrix.os == 'windows-2019'
+        run: choco upgrade mingw
 
       - name: Binaries
         env:
@@ -316,7 +312,7 @@ jobs:
         shell: powershell
         run: |
           # Get critctl tool. Used for cri-integration tests
-          $CRICTL_DOWNLOAD_URL="https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.21.0/crictl-v1.21.0-windows-amd64.tar.gz"
+          $CRICTL_DOWNLOAD_URL="https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.26.0/crictl-v1.26.0-windows-amd64.tar.gz"
           curl.exe -L $CRICTL_DOWNLOAD_URL -o c:\crictl.tar.gz
           tar -xvf c:\crictl.tar.gz
           mv crictl.exe "${{ github.workspace }}/bin/crictl.exe" # Move crictl somewhere in path
@@ -339,9 +335,10 @@ jobs:
       - name: Integration 1
         env:
           CGO_ENABLED: 1
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-serial-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-serial-gotest.json
+          EXTRA_TESTFLAGS: "-timeout=20m"
         run: mingw32-make.exe integration
       - run: if [ -f *-gotest.json ]; then echo '# Integration 1' >> $GITHUB_STEP_SUMMARY; teststat -markdown *-gotest.json >> $GITHUB_STEP_SUMMARY; fi
         if: always()
@@ -356,7 +353,7 @@ jobs:
           TESTFLAGS_PARALLEL: 1
           EXTRA_TESTFLAGS: "-short"
           CGO_ENABLED: 1
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-parallel-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-parallel-gotest.json
         run: mingw32-make.exe integration
@@ -369,14 +366,14 @@ jobs:
 
       - name: CRI Integration Test
         env:
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           TEST_IMAGE_LIST: ${{github.workspace}}/repolist.toml
         run: |
           make cri-integration
 
       - name: cri-tools critest
         env:
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           CRI_TEST_IMAGES: ${{github.workspace}}/cri-test-images.yaml
         shell: powershell
         run: |
@@ -402,7 +399,7 @@ jobs:
 
   integration-linux:
     name: Linux Integration
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 40
     needs: [project, linters, protos, man]
 
@@ -410,25 +407,17 @@ jobs:
       fail-fast: false
       matrix:
         runtime:
-          [
-            io.containerd.runtime.v1.linux,
-            io.containerd.runc.v1,
-            io.containerd.runc.v2,
-          ]
+          - io.containerd.runc.v2
         runc: [runc, crun]
-        enable_cri_sandboxes: ["", "sandboxed"]
-        exclude:
-          - runtime: io.containerd.runc.v1
-            runc: crun
-          - runtime: io.containerd.runtime.v1.linux
-            runc: crun
+        DISABLE_CRI_SANDBOXES: ["", "legacyCRI"]
 
     env:
       GOTEST: gotestsum --
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
 
       - uses: actions/checkout@v3
 
@@ -437,7 +426,7 @@ jobs:
           RUNC_FLAVOR: ${{ matrix.runc }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y gperf libbtrfs-dev
+          sudo apt-get install -y gperf
           script/setup/install-seccomp
           script/setup/install-runc
           script/setup/install-cni $(grep containernetworking/plugins go.mod | awk '{print $2}')
@@ -475,7 +464,7 @@ jobs:
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
           RUNC_FLAVOR: ${{ matrix.runc }}
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-serial-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-serial-gotest.json
         run: |
@@ -494,7 +483,7 @@ jobs:
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
           RUNC_FLAVOR: ${{ matrix.runc }}
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-parallel-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-parallel-gotest.json
         run: |
@@ -511,14 +500,14 @@ jobs:
       - name: CRI Integration Test
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
         run: |
           CONTAINERD_RUNTIME=$TEST_RUNTIME make cri-integration
 
       - name: cri-tools critest
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
-          ENABLE_CRI_SANDBOXES: ${{ matrix.enable_cri_sandboxes }}
+          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
         run: |
           sudo -E PATH=$PATH ./script/critest.sh "${{github.workspace}}/report"
 
@@ -531,6 +520,10 @@ jobs:
           mount
           df
           losetup -l
+      - name: Kernel Message
+        if: failure()
+        run: sudo dmesg -T -f kern
+
       - uses: actions/upload-artifact@v3
         if: always()
         with:
@@ -541,6 +534,82 @@ jobs:
             ${{github.workspace}}/report/*.xml
             ${{github.workspace}}/report/*.log
 
+  integration-vagrant:
+    name: Vagrant integration
+    # "Larger" runner is needed for nested virtualization
+    # https://github.com/organizations/containerd/settings/actions/runners
+    runs-on: ubuntu-latest-4-cores
+    timeout-minutes: 60
+    needs: [project, linters, protos, man]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        box:
+          - fedora/38-cloud-base
+          - rockylinux/8@8.0.0
+    env:
+      BOX: ${{ matrix.box }}
+
+    steps:
+      - name: Show the host info
+        run: |
+          set -x
+          uname -a
+          cat /etc/os-release
+          cat /proc/cpuinfo
+          free -mt
+      - uses: actions/checkout@v3
+      - uses: actions/cache@v3
+        with:
+          path: /root/.vagrant.d
+          key: vagrant-${{ matrix.box }}
+      - name: Set up vagrant
+        run: |
+          # Canonical's Vagrant 2.2.19 dpkg cannot download Fedora 38 image: https://bugs.launchpad.net/vagrant/+bug/2017828
+          # So we have to install Vagrant >= 2.3.1 from the upstream: https://github.com/opencontainers/runc/blob/v1.1.8/.cirrus.yml#L41-L49
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y libvirt-daemon libvirt-daemon-system vagrant
+          sudo systemctl enable --now libvirtd
+          sudo apt-get build-dep -y vagrant ruby-libvirt
+          sudo apt-get install -y --no-install-recommends libxslt-dev libxml2-dev libvirt-dev ruby-bundler ruby-dev zlib1g-dev
+          sudo vagrant plugin install vagrant-libvirt
+      - name: Boot VM
+        run: sudo BOX=$BOX vagrant up --no-tty
+      - name: test-integration
+        run: sudo BOX=$BOX vagrant up --provision-with=selinux,install-runc,install-gotestsum,test-integration
+      - name: test-cri-integration
+        run: sudo BOX=$BOX vagrant up --provision-with=selinux,install-runc,install-gotestsum,test-cri-integration
+      - name: test-cri
+        run: sudo BOX=$BOX vagrant up --provision-with=selinux,install-runc,install-gotestsum,test-cri
+
+  tests-cri-in-userns:
+    name: "CRI-in-UserNS"
+
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    needs: [project, linters, protos, man]
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up cgroup v2 delegation
+        run: |
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          cat <<EOF | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+          [Service]
+          Delegate=cpu cpuset io memory pids
+          EOF
+          sudo systemctl daemon-reload
+      - name: Build cri-in-userns image
+        run: podman build --target cri-in-userns -t cri-in-userns -f ./contrib/Dockerfile.test .
+      - name: Run cri-in-userns image
+        # Rootless Podman is used for testing CRI-in-UserNS
+        # (We could use rootless Docker or rootless nerdctl, but we are using Podman here because it is preinstalled)
+        run: podman run --rm --privileged cri-in-userns
+
   tests-mac-os:
     name: MacOS unit tests
     runs-on: macos-12
@@ -550,9 +619,10 @@ jobs:
       GOTEST: gotestsum --
 
     steps:
-      - uses: actions/setup-go@v3
+      - uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: false # see actions/setup-go#368
       - uses: actions/checkout@v3
       - run: script/setup/install-gotestsum
       - run: script/setup/install-teststat

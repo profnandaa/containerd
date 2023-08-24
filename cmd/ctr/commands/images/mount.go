@@ -32,7 +32,7 @@ import (
 
 var mountCommand = cli.Command{
 	Name:      "mount",
-	Usage:     "mount an image to a target path",
+	Usage:     "Mount an image to a target path",
 	ArgsUsage: "[flags] <ref> <target>",
 	Description: `Mount an image rootfs to a specified path.
 
@@ -41,11 +41,11 @@ When you are done, use the unmount command.
 	Flags: append(append(commands.RegistryFlags, append(commands.SnapshotterFlags, commands.LabelFlag)...),
 		cli.BoolFlag{
 			Name:  "rw",
-			Usage: "enable write support on the mount",
+			Usage: "Enable write support on the mount",
 		},
 		cli.StringFlag{
 			Name:  "platform",
-			Usage: "mount the image for the specified platform",
+			Usage: "Mount the image for the specified platform",
 			Value: platforms.DefaultString(),
 		},
 	),

@@ -25,15 +25,17 @@ import (
 
 	"github.com/containerd/containerd"
 	eventtypes "github.com/containerd/containerd/api/events"
+	apitasks "github.com/containerd/containerd/api/services/tasks/v1"
 	containerdio "github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/cri/constants"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 	"github.com/containerd/containerd/protobuf"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	"github.com/sirupsen/logrus"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/utils/clock"
@@ -115,7 +117,7 @@ func (em *eventMonitor) startSandboxExitMonitor(ctx context.Context, id string, 
 		case exitRes := <-exitCh:
 			exitStatus, exitedAt, err := exitRes.Result()
 			if err != nil {
-				logrus.WithError(err).Errorf("failed to get task exit status for %q", id)
+				log.L.WithError(err).Errorf("failed to get task exit status for %q", id)
 				exitStatus = unknownExitCode
 				exitedAt = time.Now()
 			}
@@ -128,7 +130,7 @@ func (em *eventMonitor) startSandboxExitMonitor(ctx context.Context, id string, 
 				ExitedAt:    protobuf.ToTimestamp(exitedAt),
 			}
 
-			logrus.Debugf("received exit event %+v", e)
+			log.L.Debugf("received exit event %+v", e)
 
 			err = func() error {
 				dctx := ctrdutil.NamespacedContext()
@@ -147,7 +149,7 @@ func (em *eventMonitor) startSandboxExitMonitor(ctx context.Context, id string, 
 				return nil
 			}()
 			if err != nil {
-				logrus.WithError(err).Errorf("failed to handle sandbox TaskExit event %+v", e)
+				log.L.WithError(err).Errorf("failed to handle sandbox TaskExit event %+v", e)
 				em.backOff.enBackOff(id, e)
 			}
 			return
@@ -166,7 +168,7 @@ func (em *eventMonitor) startContainerExitMonitor(ctx context.Context, id string
 		case exitRes := <-exitCh:
 			exitStatus, exitedAt, err := exitRes.Result()
 			if err != nil {
-				logrus.WithError(err).Errorf("failed to get task exit status for %q", id)
+				log.L.WithError(err).Errorf("failed to get task exit status for %q", id)
 				exitStatus = unknownExitCode
 				exitedAt = time.Now()
 			}
@@ -179,7 +181,7 @@ func (em *eventMonitor) startContainerExitMonitor(ctx context.Context, id string
 				ExitedAt:    protobuf.ToTimestamp(exitedAt),
 			}
 
-			logrus.Debugf("received exit event %+v", e)
+			log.L.Debugf("received exit event %+v", e)
 
 			err = func() error {
 				dctx := ctrdutil.NamespacedContext()
@@ -198,7 +200,7 @@ func (em *eventMonitor) startContainerExitMonitor(ctx context.Context, id string
 				return nil
 			}()
 			if err != nil {
-				logrus.WithError(err).Errorf("failed to handle container TaskExit event %+v", e)
+				log.L.WithError(err).Errorf("failed to handle container TaskExit event %+v", e)
 				em.backOff.enBackOff(id, e)
 			}
 			return
@@ -251,14 +253,14 @@ func (em *eventMonitor) start() <-chan error {
 		for {
 			select {
 			case e := <-em.ch:
-				logrus.Debugf("Received containerd event timestamp - %v, namespace - %q, topic - %q", e.Timestamp, e.Namespace, e.Topic)
+				log.L.Debugf("Received containerd event timestamp - %v, namespace - %q, topic - %q", e.Timestamp, e.Namespace, e.Topic)
 				if e.Namespace != constants.K8sContainerdNamespace {
-					logrus.Debugf("Ignoring events in namespace - %q", e.Namespace)
+					log.L.Debugf("Ignoring events in namespace - %q", e.Namespace)
 					break
 				}
 				id, evt, err := convertEvent(e.Event)
 				if err != nil {
-					logrus.WithError(err).Errorf("Failed to convert event %+v", e)
+					log.L.WithError(err).Errorf("Failed to convert event %+v", e)
 					break
 				}
 				if em.backOff.isInBackOff(id) {
@@ -281,9 +283,9 @@ func (em *eventMonitor) start() <-chan error {
 				ids := em.backOff.getExpiredIDs()
 				for _, id := range ids {
 					queue := em.backOff.deBackOff(id)
-					for i, any := range queue.events {
-						if err := em.handleEvent(any); err != nil {
-							logrus.WithError(err).Errorf("Failed to handle backOff event %+v for %s", any, id)
+					for i, evt := range queue.events {
+						if err := em.handleEvent(evt); err != nil {
+							logrus.WithError(err).Errorf("Failed to handle backOff event %+v for %s", evt, id)
 							em.backOff.reBackOff(id, queue.events[i:], queue.duration)
 							break
 						}
@@ -392,6 +394,51 @@ func handleContainerExit(ctx context.Context, e *eventtypes.TaskExit, cntr conta
 			// Move on to make sure container status is updated.
 		}
 	}
+
+	// NOTE: Both sb.Container.Task and task.Delete interface always ensures
+	// that the status of target task. However, the interfaces return
+	// ErrNotFound, which doesn't mean that the shim instance doesn't exist.
+	//
+	// There are two caches for task in containerd:
+	//
+	//   1. io.containerd.service.v1.tasks-service
+	//   2. io.containerd.runtime.v2.task
+	//
+	// First one is to maintain the shim connection and shutdown the shim
+	// in Delete API. And the second one is to maintain the lifecycle of
+	// task in shim server.
+	//
+	// So, if the shim instance is running and task has been deleted in shim
+	// server, the sb.Container.Task and task.Delete will receive the
+	// ErrNotFound. If we don't delete the shim instance in io.containerd.service.v1.tasks-service,
+	// shim will be leaky.
+	//
+	// Based on containerd/containerd#7496 issue, when host is under IO
+	// pressure, the umount2 syscall will take more than 10 seconds so that
+	// the CRI plugin will cancel this task.Delete call. However, the shim
+	// server isn't aware about this. After return from umount2 syscall, the
+	// shim server continue delete the task record. And then CRI plugin
+	// retries to delete task and retrieves ErrNotFound and marks it as
+	// stopped. Therefore, The shim is leaky.
+	//
+	// It's hard to handle the connection lost or request canceled cases in
+	// shim server. We should call Delete API to io.containerd.service.v1.tasks-service
+	// to ensure that shim instance is shutdown.
+	//
+	// REF:
+	// 1. https://github.com/containerd/containerd/issues/7496#issuecomment-1671100968
+	// 2. https://github.com/containerd/containerd/issues/8931
+	if errdefs.IsNotFound(err) {
+		_, err = c.client.TaskService().Delete(ctx, &apitasks.DeleteTaskRequest{ContainerID: cntr.Container.ID()})
+		if err != nil {
+			err = errdefs.FromGRPC(err)
+			if !errdefs.IsNotFound(err) {
+				return fmt.Errorf("failed to cleanup container %s in task-service: %w", cntr.Container.ID(), err)
+			}
+		}
+		logrus.Infof("Ensure that container %s in task-service has been cleanup successfully", cntr.Container.ID())
+	}
+
 	err = cntr.Status.UpdateSync(func(status containerstore.Status) (containerstore.Status, error) {
 		if status.FinishedAt == 0 {
 			status.Pid = 0
@@ -432,6 +479,50 @@ func handleSandboxExit(ctx context.Context, e *eventtypes.TaskExit, sb sandboxst
 			}
 			// Move on to make sure container status is updated.
 		}
+	}
+
+	// NOTE: Both sb.Container.Task and task.Delete interface always ensures
+	// that the status of target task. However, the interfaces return
+	// ErrNotFound, which doesn't mean that the shim instance doesn't exist.
+	//
+	// There are two caches for task in containerd:
+	//
+	//   1. io.containerd.service.v1.tasks-service
+	//   2. io.containerd.runtime.v2.task
+	//
+	// First one is to maintain the shim connection and shutdown the shim
+	// in Delete API. And the second one is to maintain the lifecycle of
+	// task in shim server.
+	//
+	// So, if the shim instance is running and task has been deleted in shim
+	// server, the sb.Container.Task and task.Delete will receive the
+	// ErrNotFound. If we don't delete the shim instance in io.containerd.service.v1.tasks-service,
+	// shim will be leaky.
+	//
+	// Based on containerd/containerd#7496 issue, when host is under IO
+	// pressure, the umount2 syscall will take more than 10 seconds so that
+	// the CRI plugin will cancel this task.Delete call. However, the shim
+	// server isn't aware about this. After return from umount2 syscall, the
+	// shim server continue delete the task record. And then CRI plugin
+	// retries to delete task and retrieves ErrNotFound and marks it as
+	// stopped. Therefore, The shim is leaky.
+	//
+	// It's hard to handle the connection lost or request canceled cases in
+	// shim server. We should call Delete API to io.containerd.service.v1.tasks-service
+	// to ensure that shim instance is shutdown.
+	//
+	// REF:
+	// 1. https://github.com/containerd/containerd/issues/7496#issuecomment-1671100968
+	// 2. https://github.com/containerd/containerd/issues/8931
+	if errdefs.IsNotFound(err) {
+		_, err = c.client.TaskService().Delete(ctx, &apitasks.DeleteTaskRequest{ContainerID: sb.Container.ID()})
+		if err != nil {
+			err = errdefs.FromGRPC(err)
+			if !errdefs.IsNotFound(err) {
+				return fmt.Errorf("failed to cleanup sandbox %s in task-service: %w", sb.Container.ID(), err)
+			}
+		}
+		logrus.Infof("Ensure that sandbox %s in task-service has been cleanup successfully", sb.Container.ID())
 	}
 	err = sb.Status.Update(func(status sandboxstore.Status) (sandboxstore.Status, error) {
 		status.State = sandboxstore.StateNotReady

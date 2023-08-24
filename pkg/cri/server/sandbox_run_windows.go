@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/snapshots"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -81,14 +80,9 @@ func (c *criService) sandboxContainerSpec(id string, config *runtime.PodSandboxC
 		specOpts = append(specOpts, customopts.WithAnnotation(pKey, pValue))
 	}
 
+	specOpts = append(specOpts, customopts.WithAnnotation(annotations.WindowsHostProcess, strconv.FormatBool(config.GetWindows().GetSecurityContext().GetHostProcess())))
 	specOpts = append(specOpts,
-		customopts.WithAnnotation(annotations.ContainerType, annotations.ContainerTypeSandbox),
-		customopts.WithAnnotation(annotations.SandboxID, id),
-		customopts.WithAnnotation(annotations.SandboxNamespace, config.GetMetadata().GetNamespace()),
-		customopts.WithAnnotation(annotations.SandboxUID, config.GetMetadata().GetUid()),
-		customopts.WithAnnotation(annotations.SandboxName, config.GetMetadata().GetName()),
-		customopts.WithAnnotation(annotations.SandboxLogDir, config.GetLogDirectory()),
-		customopts.WithAnnotation(annotations.WindowsHostProcess, strconv.FormatBool(config.GetWindows().GetSecurityContext().GetHostProcess())),
+		annotations.DefaultCRIAnnotations(id, "", "", config, true)...,
 	)
 
 	return c.runtimeSpec(id, "", specOpts...)
@@ -106,11 +100,6 @@ func (c *criService) setupSandboxFiles(id string, config *runtime.PodSandboxConf
 
 // No sandbox files needed for windows.
 func (c *criService) cleanupSandboxFiles(id string, config *runtime.PodSandboxConfig) error {
-	return nil
-}
-
-// No task options needed for windows.
-func (c *criService) taskOpts(runtimeType string) []containerd.NewTaskOpts {
 	return nil
 }
 

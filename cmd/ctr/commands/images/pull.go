@@ -32,6 +32,7 @@ import (
 	"github.com/containerd/containerd/pkg/progress"
 	"github.com/containerd/containerd/pkg/transfer"
 	"github.com/containerd/containerd/pkg/transfer/image"
+	"github.com/containerd/containerd/pkg/transfer/registry"
 	"github.com/containerd/containerd/platforms"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -40,7 +41,7 @@ import (
 
 var pullCommand = cli.Command{
 	Name:      "pull",
-	Usage:     "pull an image from a remote",
+	Usage:     "Pull an image from a remote",
 	ArgsUsage: "[flags] <ref>",
 	Description: `Fetch and prepare an image for use in containerd.
 
@@ -100,18 +101,19 @@ command. As part of this process, we do the following:
 
 			var sopts []image.StoreOpt
 			if !context.Bool("all-platforms") {
-				var p []ocispec.Platform
-				for _, s := range context.StringSlice("platform") {
-					ps, err := platforms.Parse(s)
-					if err != nil {
-						return fmt.Errorf("unable to parse platform %s: %w", s, err)
-					}
-					p = append(p, ps)
+				p, err := platforms.ParseAll(context.StringSlice("platform"))
+				if err != nil {
+					return err
 				}
 				if len(p) == 0 {
 					p = append(p, platforms.DefaultSpec())
 				}
 				sopts = append(sopts, image.WithPlatforms(p...))
+
+				// Set unpack configuration
+				for _, platform := range p {
+					sopts = append(sopts, image.WithUnpack(platform, context.String("snapshotter")))
+				}
 			}
 			// TODO: Support unpack for all platforms..?
 			// Pass in a *?
@@ -119,13 +121,13 @@ command. As part of this process, we do the following:
 			if context.Bool("metadata-only") {
 				sopts = append(sopts, image.WithAllMetadata)
 				// Any with an empty set is None
-				// TODO: Specify way to specify not default platorm
-				//config.PlatformMatcher = platforms.Any()
+				// TODO: Specify way to specify not default platform
+				// config.PlatformMatcher = platforms.Any()
 			} else if context.Bool("all-metadata") {
 				sopts = append(sopts, image.WithAllMetadata)
 			}
 
-			reg := image.NewOCIRegistry(ref, nil, ch)
+			reg := registry.NewOCIRegistry(ref, nil, ch)
 			is := image.NewStore(ref, sopts...)
 
 			pf, done := ProgressHandler(ctx, os.Stdout)
@@ -162,12 +164,9 @@ command. As part of this process, we do the following:
 				return fmt.Errorf("unable to resolve image platforms: %w", err)
 			}
 		} else {
-			for _, s := range context.StringSlice("platform") {
-				ps, err := platforms.Parse(s)
-				if err != nil {
-					return fmt.Errorf("unable to parse platform %s: %w", s, err)
-				}
-				p = append(p, ps)
+			p, err = platforms.ParseAll(context.StringSlice("platform"))
+			if err != nil {
+				return err
 			}
 		}
 		if len(p) == 0 {

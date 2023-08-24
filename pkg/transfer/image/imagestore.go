@@ -20,6 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/containerd/typeurl/v2"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
 	"github.com/containerd/containerd/api/types"
 	transfertypes "github.com/containerd/containerd/api/types/transfer"
 	"github.com/containerd/containerd/content"
@@ -27,12 +30,10 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/images/archive"
 	"github.com/containerd/containerd/pkg/streaming"
+	"github.com/containerd/containerd/pkg/transfer"
 	"github.com/containerd/containerd/pkg/transfer/plugins"
-	"github.com/containerd/containerd/pkg/unpack"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/typeurl"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func init() {
@@ -48,21 +49,40 @@ type Store struct {
 	labelMap      func(ocispec.Descriptor) []string
 	manifestLimit int
 
-	//import image options
-	namePrefix   string
-	checkPrefix  bool
-	digestRefs   bool
-	alwaysDigest bool
+	// extraReferences are used to store or lookup multiple references
+	extraReferences []Reference
 
-	unpacks []UnpackConfiguration
+	unpacks []transfer.UnpackConfiguration
 }
 
-// UnpackConfiguration specifies the platform and snapshotter to use for resolving
-// the unpack Platform, if snapshotter is not specified the platform default will
-// be used.
-type UnpackConfiguration struct {
-	Platform    ocispec.Platform
-	Snapshotter string
+// Reference is used to create or find a reference for an image
+type Reference struct {
+	Name string
+
+	// IsPrefix determines whether the Name should be considered
+	// a prefix (without tag or digest).
+	// For lookup, this may allow matching multiple tags.
+	// For store, this must have a tag or digest added.
+	IsPrefix bool
+
+	// AllowOverwrite allows overwriting or ignoring the name if
+	// another reference is provided (such as through an annotation).
+	// Only used if IsPrefix is true.
+	AllowOverwrite bool
+
+	// AddDigest adds the manifest digest to the reference.
+	// For lookup, this allows matching tags with any digest.
+	// For store, this allows adding the digest to the name.
+	// Only used if IsPrefix is true.
+	AddDigest bool
+
+	// SkipNamedDigest only considers digest references which do not
+	// have a non-digested named reference.
+	// For lookup, this will deduplicate digest references when there is a named match.
+	// For store, this only adds this digest reference when there is no matching full
+	// name reference from the prefix.
+	// Only used if IsPrefix is true.
+	SkipNamedDigest bool
 }
 
 // StoreOpt defines options when configuring an image store source or destination
@@ -93,29 +113,58 @@ func WithAllMetadata(s *Store) {
 	s.allMetadata = true
 }
 
-// WithNamePrefix sets the name prefix for imported images, if
-// check is enabled, then only images with the prefix are stored.
-func WithNamePrefix(prefix string, check bool) StoreOpt {
+// WithNamedPrefix uses a named prefix to references images which only have a tag name
+// reference in the annotation or check full references annotations against. Images
+// with no reference resolved from matching annotations will not be stored.
+// - name: image name prefix to append a tag to or check full name references with
+// - allowOverwrite: allows the tag to be overwritten by full name reference inside
+// the image which does not have name as the prefix
+func WithNamedPrefix(name string, allowOverwrite bool) StoreOpt {
+	ref := Reference{
+		Name:           name,
+		IsPrefix:       true,
+		AllowOverwrite: allowOverwrite,
+	}
 	return func(s *Store) {
-		s.namePrefix = prefix
-		s.checkPrefix = check
+		s.extraReferences = append(s.extraReferences, ref)
 	}
 }
 
-// WithDigestRefs sets digest refs for imported images, if
-// always is enabled, then digest refs are added even if a
-// non-digest image name is added for the same image.
-func WithDigestRefs(always bool) StoreOpt {
+// WithDigestRef uses a named prefix to references images which only have a tag name
+// reference in the annotation or check full references annotations against and
+// additionally may add a digest reference. Images with no references resolved
+// from matching annotations may be stored by digest.
+// - name: image name prefix to append a tag to or check full name references with
+// - allowOverwrite: allows the tag to be overwritten by full name reference inside
+// the image which does not have name as the prefix
+// - skipNamed: is set if no digest reference should be created if a named reference
+// is successfully resolved from the annotations.
+func WithDigestRef(name string, allowOverwrite bool, skipNamed bool) StoreOpt {
+	ref := Reference{
+		Name:            name,
+		IsPrefix:        true,
+		AllowOverwrite:  allowOverwrite,
+		AddDigest:       true,
+		SkipNamedDigest: skipNamed,
+	}
 	return func(s *Store) {
-		s.digestRefs = true
-		s.alwaysDigest = always
+		s.extraReferences = append(s.extraReferences, ref)
+	}
+}
+
+func WithExtraReference(name string) StoreOpt {
+	ref := Reference{
+		Name: name,
+	}
+	return func(s *Store) {
+		s.extraReferences = append(s.extraReferences, ref)
 	}
 }
 
 // WithUnpack specifies a platform to unpack for and an optional snapshotter to use
 func WithUnpack(p ocispec.Platform, snapshotter string) StoreOpt {
 	return func(s *Store) {
-		s.unpacks = append(s.unpacks, UnpackConfiguration{
+		s.unpacks = append(s.unpacks, transfer.UnpackConfiguration{
 			Platform:    p,
 			Snapshotter: snapshotter,
 		})
@@ -163,92 +212,160 @@ func (is *Store) ImageFilter(h images.HandlerFunc, cs content.Store) images.Hand
 	return h
 }
 
-func (is *Store) Store(ctx context.Context, desc ocispec.Descriptor, store images.Store) (images.Image, error) {
-	img := images.Image{
-		Name:   is.imageName,
-		Target: desc,
-		Labels: is.imageLabels,
-	}
+func (is *Store) Store(ctx context.Context, desc ocispec.Descriptor, store images.Store) ([]images.Image, error) {
+	var imgs []images.Image
 
-	// Handle imported image names
-	if refType, ok := desc.Annotations["io.containerd.import.ref-type"]; ok {
-		var nameT func(string) string
-		if is.checkPrefix {
-			nameT = archive.FilterRefPrefix(is.namePrefix)
-		} else {
-			nameT = archive.AddRefPrefix(is.namePrefix)
-		}
-		name := imageName(desc.Annotations, nameT)
-		switch refType {
-		case "name":
-			if name == "" {
-				return images.Image{}, fmt.Errorf("no image name: %w", errdefs.ErrNotFound)
+	// If import ref type, store references from annotation or prefix
+	if refSource, ok := desc.Annotations["io.containerd.import.ref-source"]; ok {
+		switch refSource {
+		case "annotation":
+			for _, ref := range is.extraReferences {
+				// Only use prefix references for annotation matching
+				if !ref.IsPrefix {
+					continue
+				}
+
+				var nameT func(string) string
+				if ref.AllowOverwrite {
+					nameT = archive.AddRefPrefix(ref.Name)
+				} else {
+					nameT = archive.FilterRefPrefix(ref.Name)
+				}
+				name := imageName(desc.Annotations, nameT)
+
+				if name == "" {
+					// If digested, add digest reference
+					if ref.AddDigest {
+						imgs = append(imgs, images.Image{
+							Name:   fmt.Sprintf("%s@%s", ref.Name, desc.Digest),
+							Target: desc,
+							Labels: is.imageLabels,
+						})
+					}
+					continue
+				}
+
+				imgs = append(imgs, images.Image{
+					Name:   name,
+					Target: desc,
+					Labels: is.imageLabels,
+				})
+
+				// If a named reference was found and SkipNamedDigest is true, do
+				// not use this reference
+				if ref.AddDigest && !ref.SkipNamedDigest {
+					imgs = append(imgs, images.Image{
+						Name:   fmt.Sprintf("%s@%s", ref.Name, desc.Digest),
+						Target: desc,
+						Labels: is.imageLabels,
+					})
+				}
 			}
-			img.Name = name
-		case "digest":
-			if !is.digestRefs || (!is.alwaysDigest && name != "") {
-				return images.Image{}, fmt.Errorf("no digest refs: %w", errdefs.ErrNotFound)
-			}
-			img.Name = fmt.Sprintf("%s@%s", is.namePrefix, desc.Digest)
 		default:
-			return images.Image{}, fmt.Errorf("ref type not supported: %w", errdefs.ErrInvalidArgument)
+			return nil, fmt.Errorf("ref source not supported: %w", errdefs.ErrInvalidArgument)
 		}
-		delete(desc.Annotations, "io.containerd.import.ref-type")
-	} else if img.Name == "" {
-		// No valid image combination found
-		return images.Image{}, fmt.Errorf("no image name found: %w", errdefs.ErrNotFound)
+		delete(desc.Annotations, "io.containerd.import.ref-source")
+	} else {
+		if is.imageName != "" {
+			imgs = append(imgs, images.Image{
+				Name:   is.imageName,
+				Target: desc,
+				Labels: is.imageLabels,
+			})
+		}
+
+		// If extra references, store all complete references (skip prefixes)
+		for _, ref := range is.extraReferences {
+			if ref.IsPrefix {
+				continue
+			}
+			name := ref.Name
+			if ref.AddDigest {
+				name = fmt.Sprintf("%s@%s", name, desc.Digest)
+			}
+			imgs = append(imgs, images.Image{
+				Name:   name,
+				Target: desc,
+				Labels: is.imageLabels,
+			})
+		}
 	}
 
-	for {
-		if created, err := store.Create(ctx, img); err != nil {
+	if len(imgs) == 0 {
+		return nil, fmt.Errorf("no image name found: %w", errdefs.ErrNotFound)
+	}
+
+	for i := 0; i < len(imgs); {
+		if created, err := store.Create(ctx, imgs[i]); err != nil {
 			if !errdefs.IsAlreadyExists(err) {
-				return images.Image{}, err
+				return nil, err
 			}
 
-			updated, err := store.Update(ctx, img)
+			updated, err := store.Update(ctx, imgs[i])
 			if err != nil {
 				// if image was removed, try create again
 				if errdefs.IsNotFound(err) {
+					// Keep trying same image
 					continue
 				}
-				return images.Image{}, err
+				return nil, err
 			}
 
-			img = updated
+			imgs[i] = updated
 		} else {
-			img = created
+			imgs[i] = created
 		}
 
-		return img, nil
+		i++
 	}
+
+	return imgs, nil
 }
 
 func (is *Store) Get(ctx context.Context, store images.Store) (images.Image, error) {
 	return store.Get(ctx, is.imageName)
 }
 
-func (is *Store) UnpackPlatforms() []unpack.Platform {
-	unpacks := make([]unpack.Platform, len(is.unpacks))
+func (is *Store) Lookup(ctx context.Context, store images.Store) ([]images.Image, error) {
+	var imgs []images.Image
+	if is.imageName != "" {
+		img, err := store.Get(ctx, is.imageName)
+		if err != nil {
+			return nil, err
+		}
+		imgs = append(imgs, img)
+	}
+	for _, ref := range is.extraReferences {
+		if ref.IsPrefix {
+			return nil, fmt.Errorf("prefix lookup on export not implemented: %w", errdefs.ErrNotImplemented)
+		}
+		img, err := store.Get(ctx, ref.Name)
+		if err != nil {
+			return nil, err
+		}
+		imgs = append(imgs, img)
+	}
+	return imgs, nil
+}
+
+func (is *Store) UnpackPlatforms() []transfer.UnpackConfiguration {
+	unpacks := make([]transfer.UnpackConfiguration, len(is.unpacks))
 	for i, uc := range is.unpacks {
-		unpacks[i].SnapshotterKey = uc.Snapshotter
-		unpacks[i].Platform = platforms.Only(uc.Platform)
+		unpacks[i].Snapshotter = uc.Snapshotter
+		unpacks[i].Platform = uc.Platform
 	}
 	return unpacks
 }
 
 func (is *Store) MarshalAny(context.Context, streaming.StreamCreator) (typeurl.Any, error) {
-	//unpack.Platform
 	s := &transfertypes.ImageStore{
-		Name:          is.imageName,
-		Labels:        is.imageLabels,
-		ManifestLimit: uint32(is.manifestLimit),
-		AllMetadata:   is.allMetadata,
-		Platforms:     platformsToProto(is.platforms),
-		Prefix:        is.namePrefix,
-		CheckPrefix:   is.checkPrefix,
-		DigestRefs:    is.digestRefs,
-		AlwaysDigest:  is.alwaysDigest,
-		Unpacks:       unpackToProto(is.unpacks),
+		Name:            is.imageName,
+		Labels:          is.imageLabels,
+		ManifestLimit:   uint32(is.manifestLimit),
+		AllMetadata:     is.allMetadata,
+		Platforms:       platforms.ToProto(is.platforms),
+		ExtraReferences: referencesToProto(is.extraReferences),
+		Unpacks:         unpackToProto(is.unpacks),
 	}
 	return typeurl.MarshalAny(s)
 }
@@ -263,41 +380,41 @@ func (is *Store) UnmarshalAny(ctx context.Context, sm streaming.StreamGetter, a 
 	is.imageLabels = s.Labels
 	is.manifestLimit = int(s.ManifestLimit)
 	is.allMetadata = s.AllMetadata
-	is.platforms = platformFromProto(s.Platforms)
-	is.namePrefix = s.Prefix
-	is.checkPrefix = s.CheckPrefix
-	is.digestRefs = s.DigestRefs
-	is.alwaysDigest = s.AlwaysDigest
+	is.platforms = platforms.FromProto(s.Platforms)
+	is.extraReferences = referencesFromProto(s.ExtraReferences)
 	is.unpacks = unpackFromProto(s.Unpacks)
 
 	return nil
 }
 
-func platformsToProto(platforms []ocispec.Platform) []*types.Platform {
-	ap := make([]*types.Platform, len(platforms))
-	for i := range platforms {
-		p := types.Platform{
-			OS:           platforms[i].OS,
-			Architecture: platforms[i].Architecture,
-			Variant:      platforms[i].Variant,
+func referencesToProto(references []Reference) []*transfertypes.ImageReference {
+	ir := make([]*transfertypes.ImageReference, len(references))
+	for i := range references {
+		r := transfertypes.ImageReference{
+			Name:            references[i].Name,
+			IsPrefix:        references[i].IsPrefix,
+			AllowOverwrite:  references[i].AllowOverwrite,
+			AddDigest:       references[i].AddDigest,
+			SkipNamedDigest: references[i].SkipNamedDigest,
 		}
 
-		ap[i] = &p
+		ir[i] = &r
 	}
-	return ap
+	return ir
 }
 
-func platformFromProto(platforms []*types.Platform) []ocispec.Platform {
-	op := make([]ocispec.Platform, len(platforms))
-	for i := range platforms {
-		op[i].OS = platforms[i].OS
-		op[i].Architecture = platforms[i].Architecture
-		op[i].Variant = platforms[i].Variant
+func referencesFromProto(references []*transfertypes.ImageReference) []Reference {
+	or := make([]Reference, len(references))
+	for i := range references {
+		or[i].Name = references[i].Name
+		or[i].IsPrefix = references[i].IsPrefix
+		or[i].AllowOverwrite = references[i].AllowOverwrite
+		or[i].AddDigest = references[i].AddDigest
+		or[i].SkipNamedDigest = references[i].SkipNamedDigest
 	}
-	return op
+	return or
 }
-
-func unpackToProto(uc []UnpackConfiguration) []*transfertypes.UnpackConfiguration {
+func unpackToProto(uc []transfer.UnpackConfiguration) []*transfertypes.UnpackConfiguration {
 	auc := make([]*transfertypes.UnpackConfiguration, len(uc))
 	for i := range uc {
 		p := types.Platform{
@@ -313,8 +430,8 @@ func unpackToProto(uc []UnpackConfiguration) []*transfertypes.UnpackConfiguratio
 	return auc
 }
 
-func unpackFromProto(auc []*transfertypes.UnpackConfiguration) []UnpackConfiguration {
-	uc := make([]UnpackConfiguration, len(auc))
+func unpackFromProto(auc []*transfertypes.UnpackConfiguration) []transfer.UnpackConfiguration {
+	uc := make([]transfer.UnpackConfiguration, len(auc))
 	for i := range auc {
 		uc[i].Snapshotter = auc[i].Snapshotter
 		if auc[i].Platform != nil {
@@ -326,15 +443,23 @@ func unpackFromProto(auc []*transfertypes.UnpackConfiguration) []UnpackConfigura
 	return uc
 }
 
-func imageName(annotations map[string]string, ociCleanup func(string) string) string {
+func imageName(annotations map[string]string, cleanup func(string) string) string {
 	name := annotations[images.AnnotationImageName]
 	if name != "" {
+		if cleanup != nil {
+			// containerd reference name should be full reference and not
+			// modified, if it is incomplete or does not match a specified
+			// prefix, do not use the reference
+			if cleanName := cleanup(name); cleanName != name {
+				name = ""
+			}
+		}
 		return name
 	}
 	name = annotations[ocispec.AnnotationRefName]
 	if name != "" {
-		if ociCleanup != nil {
-			name = ociCleanup(name)
+		if cleanup != nil {
+			name = cleanup(name)
 		}
 	}
 	return name

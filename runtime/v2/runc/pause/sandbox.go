@@ -23,9 +23,10 @@ import (
 	"runtime"
 
 	"github.com/containerd/containerd/api/types"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/shutdown"
+	"github.com/containerd/containerd/runtime/v2/shim"
 	"github.com/containerd/ttrpc"
-	log "github.com/sirupsen/logrus"
 
 	api "github.com/containerd/containerd/api/runtime/sandbox/v1"
 	"github.com/containerd/containerd/plugin"
@@ -51,12 +52,15 @@ func init() {
 	})
 }
 
+var (
+	_ = shim.TTRPCService(&pauseService{})
+	_ = api.TTRPCSandboxService(&pauseService{})
+)
+
 // pauseService is an extension for task v2 runtime to support Pod "pause" containers via sandbox API.
 type pauseService struct {
 	shutdown shutdown.Service
 }
-
-var _ api.TTRPCSandboxService = (*pauseService)(nil)
 
 func (p *pauseService) RegisterTTRPC(server *ttrpc.Server) error {
 	api.RegisterTTRPCSandboxService(server, p)
@@ -64,17 +68,17 @@ func (p *pauseService) RegisterTTRPC(server *ttrpc.Server) error {
 }
 
 func (p *pauseService) CreateSandbox(ctx context.Context, req *api.CreateSandboxRequest) (*api.CreateSandboxResponse, error) {
-	log.Debugf("create sandbox request: %+v", req)
+	log.G(ctx).Debugf("create sandbox request: %+v", req)
 	return &api.CreateSandboxResponse{}, nil
 }
 
 func (p *pauseService) StartSandbox(ctx context.Context, req *api.StartSandboxRequest) (*api.StartSandboxResponse, error) {
-	log.Debugf("start sandbox request: %+v", req)
+	log.G(ctx).Debugf("start sandbox request: %+v", req)
 	return &api.StartSandboxResponse{}, nil
 }
 
 func (p *pauseService) Platform(ctx context.Context, req *api.PlatformRequest) (*api.PlatformResponse, error) {
-	log.Debugf("platform request: %+v", req)
+	log.G(ctx).Debugf("platform request: %+v", req)
 
 	platform := types.Platform{
 		OS:           runtime.GOOS,
@@ -85,19 +89,20 @@ func (p *pauseService) Platform(ctx context.Context, req *api.PlatformRequest) (
 }
 
 func (p *pauseService) StopSandbox(ctx context.Context, req *api.StopSandboxRequest) (*api.StopSandboxResponse, error) {
-	log.Debugf("stop sandbox request: %+v", req)
+	log.G(ctx).Debugf("stop sandbox request: %+v", req)
 	p.shutdown.Shutdown()
 	return &api.StopSandboxResponse{}, nil
 }
 
 func (p *pauseService) WaitSandbox(ctx context.Context, req *api.WaitSandboxRequest) (*api.WaitSandboxResponse, error) {
+	log.G(ctx).Debugf("wait sandbox request: %+v", req)
 	return &api.WaitSandboxResponse{
 		ExitStatus: 0,
 	}, nil
 }
 
 func (p *pauseService) SandboxStatus(ctx context.Context, req *api.SandboxStatusRequest) (*api.SandboxStatusResponse, error) {
-	log.Debugf("sandbox status request: %+v", req)
+	log.G(ctx).Debugf("sandbox status request: %+v", req)
 	return &api.SandboxStatusResponse{}, nil
 }
 
@@ -105,6 +110,12 @@ func (p *pauseService) PingSandbox(ctx context.Context, req *api.PingRequest) (*
 	return &api.PingResponse{}, nil
 }
 
-func (p *pauseService) ShutdownSandbox(ctx context.Context, request *api.ShutdownSandboxRequest) (*api.ShutdownSandboxResponse, error) {
+func (p *pauseService) ShutdownSandbox(ctx context.Context, req *api.ShutdownSandboxRequest) (*api.ShutdownSandboxResponse, error) {
+	log.G(ctx).Debugf("shutdown sandbox request: %+v", req)
 	return &api.ShutdownSandboxResponse{}, nil
+}
+
+func (p *pauseService) SandboxMetrics(ctx context.Context, req *api.SandboxMetricsRequest) (*api.SandboxMetricsResponse, error) {
+	log.G(ctx).Debugf("sandbox metrics request: %+v", req)
+	return &api.SandboxMetricsResponse{}, nil
 }

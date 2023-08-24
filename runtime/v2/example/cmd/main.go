@@ -1,5 +1,3 @@
-//go:build linux
-
 /*
    Copyright The containerd Authors.
 
@@ -19,11 +17,13 @@
 package main
 
 import (
+	"context"
+
 	"github.com/containerd/containerd/runtime/v2/example"
 	"github.com/containerd/containerd/runtime/v2/shim"
 )
 
 func main() {
 	// init and execute the shim
-	shim.Run("io.containerd.example.v1", example.New)
+	shim.Run(context.Background(), example.NewManager("io.containerd.example.v1"))
 }

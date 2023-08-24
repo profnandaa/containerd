@@ -125,7 +125,7 @@ if [ "${CONTAINERD_TEST:-"false"}"  != "true" ]; then
   # CONTAINERD_VERSION is the cri-containerd version to use.
   version=${CONTAINERD_VERSION:-""}
 else
-  deploy_path=${CONTAINERD_DEPLOY_PATH:-"cri-containerd-staging"}
+  deploy_path=${CONTAINERD_DEPLOY_PATH:-"k8s-staging-cri-tools"}
 
   # PULL_REFS_METADATA is the metadata key of PULL_REFS from prow.
   PULL_REFS_METADATA="PULL_REFS"
@@ -240,7 +240,7 @@ containerd_extra_runtime_handler=${CONTAINERD_EXTRA_RUNTIME_HANDLER:-""}
 if [[ -n "${containerd_extra_runtime_handler}" ]]; then
   cat >> ${config_path} <<EOF
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.${containerd_extra_runtime_handler}]
-  runtime_type = "${CONTAINERD_EXTRA_RUNTIME_TYPE:-io.containerd.runc.v1}"
+  runtime_type = "${CONTAINERD_EXTRA_RUNTIME_TYPE:-io.containerd.runc.v2}"
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.${containerd_extra_runtime_handler}.options]
 ${CONTAINERD_EXTRA_RUNTIME_OPTIONS:-}

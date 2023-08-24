@@ -26,7 +26,6 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/runtime/restart"
-	"github.com/sirupsen/logrus"
 )
 
 type stopChange struct {
@@ -41,27 +40,25 @@ type startChange struct {
 	container containerd.Container
 	logURI    string
 	count     int
-
-	// Deprecated(in release 1.5): but recognized now, prefer to use logURI
-	logPath string
 }
 
 func (s *startChange) apply(ctx context.Context, client *containerd.Client) error {
 	log := cio.NullIO
-
+	spec, err := s.container.Spec(ctx)
+	if err != nil {
+		return err
+	}
+	useTTY := spec.Process.Terminal
 	if s.logURI != "" {
 		uri, err := url.Parse(s.logURI)
 		if err != nil {
 			return fmt.Errorf("failed to parse %v into url: %w", s.logURI, err)
 		}
-		log = cio.LogURI(uri)
-	} else if s.logPath != "" {
-		log = cio.LogFile(s.logPath)
-	}
-
-	if s.logURI != "" && s.logPath != "" {
-		logrus.Warnf("LogPathLabel=%v has been deprecated, using LogURILabel=%v",
-			s.logPath, s.logURI)
+		if useTTY {
+			log = cio.TerminalLogURI(uri)
+		} else {
+			log = cio.LogURI(uri)
+		}
 	}
 
 	if s.count > 0 {

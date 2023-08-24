@@ -34,15 +34,17 @@ import (
 	"time"
 
 	csapi "github.com/containerd/containerd/api/services/content/v1"
+	diffapi "github.com/containerd/containerd/api/services/diff/v1"
 	ssapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	"github.com/containerd/containerd/content/local"
 	csproxy "github.com/containerd/containerd/content/proxy"
 	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/diff"
-	"github.com/containerd/containerd/events/exchange"
+	diffproxy "github.com/containerd/containerd/diff/proxy"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/dialer"
 	"github.com/containerd/containerd/pkg/timeout"
+	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
 	srvconfig "github.com/containerd/containerd/services/server/config"
 	ssproxy "github.com/containerd/containerd/snapshots/proxy"
@@ -51,6 +53,7 @@ import (
 	"github.com/docker/go-metrics"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -192,8 +195,6 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			ttrpcServer: ttrpcServer,
 			config:      config,
 		}
-		// TODO: Remove this in 2.0 and let event plugin crease it
-		events      = exchange.NewExchange()
 		initialized = plugin.NewPluginSet()
 		required    = make(map[string]struct{})
 	)
@@ -202,10 +203,6 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 	}
 	for _, p := range plugins {
 		id := p.URI()
-		reqID := id
-		if config.GetVersion() == 1 {
-			reqID = p.ID
-		}
 		log.G(ctx).WithField("type", p.Type).Infof("loading plugin %q...", id)
 
 		initContext := plugin.NewContext(
@@ -215,9 +212,9 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			config.Root,
 			config.State,
 		)
-		initContext.Events = events
 		initContext.Address = config.GRPC.Address
 		initContext.TTRPCAddress = config.TTRPC.Address
+		initContext.RegisterReadiness = s.RegisterReadiness
 
 		// load the plugin specific configuration if it is provided
 		if p.Config != nil {
@@ -239,13 +236,13 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			} else {
 				log.G(ctx).WithError(err).Warnf("failed to load plugin %s", id)
 			}
-			if _, ok := required[reqID]; ok {
+			if _, ok := required[id]; ok {
 				return nil, fmt.Errorf("load required plugin %s: %w", id, err)
 			}
 			continue
 		}
 
-		delete(required, reqID)
+		delete(required, id)
 		// check for grpc services that should be registered with the server
 		if src, ok := instance.(grpcService); ok {
 			grpcServices = append(grpcServices, src)
@@ -293,6 +290,7 @@ type Server struct {
 	tcpServer   *grpc.Server
 	config      *srvconfig.Config
 	plugins     []*plugin.Plugin
+	ready       sync.WaitGroup
 }
 
 // ServeGRPC provides the containerd grpc APIs on the provided listener
@@ -370,6 +368,17 @@ func (s *Server) Stop() {
 	}
 }
 
+func (s *Server) RegisterReadiness() func() {
+	s.ready.Add(1)
+	return func() {
+		s.ready.Done()
+	}
+}
+
+func (s *Server) Wait() {
+	s.ready.Wait()
+}
+
 // LoadPlugins loads all plugins into containerd and generates an ordered graph
 // of all plugins.
 func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Registration, error) {
@@ -398,6 +407,8 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 			f func(*grpc.ClientConn) interface{}
 
 			address = pp.Address
+			p       v1.Platform
+			err     error
 		)
 
 		switch pp.Type {
@@ -413,8 +424,21 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 			f = func(conn *grpc.ClientConn) interface{} {
 				return csproxy.NewContentStore(csapi.NewContentClient(conn))
 			}
+		case string(plugin.DiffPlugin), "diff":
+			t = plugin.DiffPlugin
+			f = func(conn *grpc.ClientConn) interface{} {
+				return diffproxy.NewDiffApplier(diffapi.NewDiffClient(conn))
+			}
 		default:
 			log.G(ctx).WithField("type", pp.Type).Warn("unknown proxy plugin type")
+		}
+		if pp.Platform != "" {
+			p, err = platforms.Parse(pp.Platform)
+			if err != nil {
+				log.G(ctx).WithError(err).WithField("plugin", name).Warn("skipping proxy platform with bad platform")
+			}
+		} else {
+			p = platforms.DefaultSpec()
 		}
 
 		plugin.Register(&plugin.Registration{
@@ -422,6 +446,7 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 			ID:   name,
 			InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 				ic.Meta.Exports["address"] = address
+				ic.Meta.Platforms = append(ic.Meta.Platforms, p)
 				conn, err := clients.getClient(address)
 				if err != nil {
 					return nil, err
@@ -433,9 +458,6 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 	}
 
 	filter := srvconfig.V2DisabledFilter
-	if config.GetVersion() == 1 {
-		filter = srvconfig.V1DisabledFilter
-	}
 	// return the ordered graph for plugins
 	return plugin.Graph(filter(config.DisabledPlugins)), nil
 }

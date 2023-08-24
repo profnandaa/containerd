@@ -80,7 +80,7 @@ type API interface {
 	// NotifyContainerExit handles the exit event of a container.
 	NotifyContainerExit(context.Context, PodSandbox, Container)
 
-	// StopContainer relays container removal events to NRI.
+	// RemoveContainer relays container removal events to NRI.
 	RemoveContainer(context.Context, PodSandbox, Container) error
 }
 
@@ -122,6 +122,8 @@ func New(cfg *Config) (API, error) {
 		updateFn = l.updateFromPlugin
 		err      error
 	)
+
+	cfg.ConfigureTimeouts()
 
 	l.nri, err = nri.New(name, version, syncFn, updateFn, opts...)
 	if err != nil {

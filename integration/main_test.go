@@ -66,7 +66,6 @@ var (
 )
 
 var criEndpoint = flag.String("cri-endpoint", "unix:///run/containerd/containerd.sock", "The endpoint of cri plugin.")
-var criRoot = flag.String("cri-root", "/var/lib/containerd/io.containerd.grpc.v1.cri", "The root directory of cri plugin.")
 var runtimeHandler = flag.String("runtime-handler", "", "The runtime handler to use in the test.")
 var containerdBin = flag.String("containerd-bin", "containerd", "The containerd binary name. The name is used to restart containerd during test.")
 
@@ -381,6 +380,45 @@ func WithUserNamespace(containerID, hostID, length uint32) ContainerOpts {
 func WithLogPath(path string) ContainerOpts {
 	return func(c *runtime.ContainerConfig) {
 		c.LogPath = path
+	}
+}
+
+// WithRunAsUser sets the uid.
+func WithRunAsUser(uid int64) ContainerOpts {
+	return func(c *runtime.ContainerConfig) {
+		if c.Linux == nil {
+			c.Linux = &runtime.LinuxContainerConfig{}
+		}
+		if c.Linux.SecurityContext == nil {
+			c.Linux.SecurityContext = &runtime.LinuxContainerSecurityContext{}
+		}
+		c.Linux.SecurityContext.RunAsUser = &runtime.Int64Value{Value: uid}
+	}
+}
+
+// WithRunAsUsername sets the username.
+func WithRunAsUsername(username string) ContainerOpts {
+	return func(c *runtime.ContainerConfig) {
+		if c.Linux == nil {
+			c.Linux = &runtime.LinuxContainerConfig{}
+		}
+		if c.Linux.SecurityContext == nil {
+			c.Linux.SecurityContext = &runtime.LinuxContainerSecurityContext{}
+		}
+		c.Linux.SecurityContext.RunAsUsername = username
+	}
+}
+
+// WithRunAsGroup sets the gid.
+func WithRunAsGroup(gid int64) ContainerOpts {
+	return func(c *runtime.ContainerConfig) {
+		if c.Linux == nil {
+			c.Linux = &runtime.LinuxContainerConfig{}
+		}
+		if c.Linux.SecurityContext == nil {
+			c.Linux.SecurityContext = &runtime.LinuxContainerSecurityContext{}
+		}
+		c.Linux.SecurityContext.RunAsGroup = &runtime.Int64Value{Value: gid}
 	}
 }
 

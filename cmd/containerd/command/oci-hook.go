@@ -25,19 +25,21 @@ import (
 	"syscall"
 	"text/template"
 
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/containerd/containerd/oci"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli"
 )
 
 var ociHook = cli.Command{
 	Name:  "oci-hook",
-	Usage: "provides a base for OCI runtime hooks to allow arguments to be injected.",
+	Usage: "Provides a base for OCI runtime hooks to allow arguments to be injected.",
 	Action: func(context *cli.Context) error {
 		state, err := loadHookState(os.Stdin)
 		if err != nil {
 			return err
 		}
-		spec, err := loadSpec(state.Bundle)
+		specFile := filepath.Join(state.Bundle, oci.ConfigFilename)
+		spec, err := loadSpec(specFile)
 		if err != nil {
 			return err
 		}
@@ -56,14 +58,16 @@ var ociHook = cli.Command{
 	},
 }
 
+// hookSpec is a shallow version of [oci.Spec] containing only the
+// fields we need for the hook. We use a shallow struct to reduce
+// the overhead of unmarshaling.
 type hookSpec struct {
-	Root struct {
-		Path string `json:"path"`
-	} `json:"root"`
+	// Root configures the container's root filesystem.
+	Root *specs.Root `json:"root,omitempty"`
 }
 
-func loadSpec(bundle string) (*hookSpec, error) {
-	f, err := os.Open(filepath.Join(bundle, "config.json"))
+func loadSpec(path string) (*hookSpec, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}

@@ -37,11 +37,12 @@ import (
 var Command = cli.Command{
 	Name:    "images",
 	Aliases: []string{"image", "i"},
-	Usage:   "manage images",
+	Usage:   "Manage images",
 	Subcommands: cli.Commands{
 		checkCommand,
 		exportCommand,
 		importCommand,
+		inspectCommand,
 		listCommand,
 		mountCommand,
 		unmountCommand,
@@ -52,19 +53,20 @@ var Command = cli.Command{
 		tagCommand,
 		setLabelsCommand,
 		convertCommand,
+		usageCommand,
 	},
 }
 
 var listCommand = cli.Command{
 	Name:        "list",
 	Aliases:     []string{"ls"},
-	Usage:       "list images known to containerd",
+	Usage:       "List images known to containerd",
 	ArgsUsage:   "[flags] [<filter>, ...]",
 	Description: "list images registered with containerd",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "quiet, q",
-			Usage: "print only the image refs",
+			Usage: "Print only the image refs",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -141,13 +143,13 @@ var listCommand = cli.Command{
 
 var setLabelsCommand = cli.Command{
 	Name:        "label",
-	Usage:       "set and clear labels for an image",
+	Usage:       "Set and clear labels for an image",
 	ArgsUsage:   "[flags] <name> [<key>=<value>, ...]",
 	Description: "set and clear labels for an image",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "replace-all, r",
-			Usage: "replace all labels",
+			Usage: "Replace all labels",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -200,13 +202,13 @@ var setLabelsCommand = cli.Command{
 
 var checkCommand = cli.Command{
 	Name:        "check",
-	Usage:       "check existing images to ensure all content is available locally",
+	Usage:       "Check existing images to ensure all content is available locally",
 	ArgsUsage:   "[flags] [<filter>, ...]",
 	Description: "check existing images to ensure all content is available locally",
 	Flags: append([]cli.Flag{
 		cli.BoolFlag{
 			Name:  "quiet, q",
-			Usage: "print only the ready image refs (fully downloaded and unpacked)",
+			Usage: "Print only the ready image refs (fully downloaded and unpacked)",
 		},
 	}, commands.SnapshotterFlags...),
 	Action: func(context *cli.Context) error {
@@ -299,7 +301,7 @@ var checkCommand = cli.Command{
 					size,
 					unpacked)
 			} else {
-				if complete {
+				if complete && unpacked {
 					fmt.Println(image.Name())
 				}
 			}
@@ -314,7 +316,7 @@ var checkCommand = cli.Command{
 var removeCommand = cli.Command{
 	Name:        "delete",
 	Aliases:     []string{"del", "remove", "rm"},
-	Usage:       "remove one or more images by reference",
+	Usage:       "Remove one or more images by reference",
 	ArgsUsage:   "[flags] <ref> [<ref>, ...]",
 	Description: "remove one or more images by reference",
 	Flags: []cli.Flag{
@@ -359,11 +361,11 @@ var removeCommand = cli.Command{
 
 var pruneCommand = cli.Command{
 	Name:  "prune",
-	Usage: "remove unused images",
+	Usage: "Remove unused images",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "all", // TODO: add more filters
-			Usage: "remove all unused images, not just dangling ones (if all is not specified no images will be pruned)",
+			Usage: "Remove all unused images, not just dangling ones (if all is not specified no images will be pruned)",
 		},
 	},
 	// adapted from `nerdctl`:

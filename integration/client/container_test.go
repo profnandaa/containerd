@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -43,19 +44,15 @@ import (
 	gogotypes "github.com/containerd/containerd/protobuf/types"
 	_ "github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/runtime/v2/runc/options"
+	"github.com/containerd/continuity/fs"
 	"github.com/containerd/go-runc"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
 	exec "golang.org/x/sys/execabs"
 )
 
 func empty() cio.Creator {
-	// TODO (@mlaventure) windows searches for pipes
-	// when none are provided
-	if runtime.GOOS == "windows" {
-		return cio.NewCreator(cio.WithStdio, cio.WithTerminal)
-	}
 	return cio.NullIO
 }
 
@@ -174,6 +171,130 @@ func TestContainerStart(t *testing.T) {
 	}
 }
 
+func readShimPath(taskID string) (string, error) {
+	runtime := plugin.RuntimePluginV2.String() + ".task"
+	shimBinaryNamePath := filepath.Join(defaultState, runtime, testNamespace, taskID, "shim-binary-path")
+
+	shimPath, err := os.ReadFile(shimBinaryNamePath)
+	if err != nil {
+		return "", err
+	}
+	return string(shimPath), nil
+}
+
+func copyShim(shimPath string) (string, error) {
+	tempPath := filepath.Join(os.TempDir(), filepath.Base(shimPath))
+	if err := fs.CopyFile(tempPath, shimPath); err != nil {
+		return "", err
+	}
+
+	fi, err := os.Stat(shimPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(tempPath, fi.Mode().Perm()); err != nil {
+		return "", err
+	}
+
+	return tempPath, nil
+}
+
+func TestContainerStartWithAbsRuntimePath(t *testing.T) {
+	t.Parallel()
+
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext(t)
+		id          = t.Name()
+	)
+	defer cancel()
+
+	image, err = client.GetImage(ctx, testImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container, err := client.NewContainer(ctx, id, WithNewSnapshot(id, image), WithNewSpec(oci.WithImageConfig(image), withExitStatus(7)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	// create a temp task to read the default shim path
+	task, err := container.NewTask(ctx, empty())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaultShimPath, err := readShimPath(task.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// remove the temp task
+	if _, err := task.Delete(ctx, WithProcessKill); err != nil {
+		t.Fatal(err)
+	}
+
+	tempShimPath, err := copyShim(defaultShimPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tempShimPath)
+
+	task, err = container.NewTask(ctx, empty(), WithRuntimePath(tempShimPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shimPath, err := readShimPath(task.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shimPath != tempShimPath {
+		t.Fatalf("The task's shim path is %s, does not used the specified runtime path: %s", shimPath, tempShimPath)
+	}
+
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if runtime.GOOS != "windows" {
+		// task.Pid not implemented on Windows
+		if pid := task.Pid(); pid < 1 {
+			t.Errorf("invalid task pid %d", pid)
+		}
+	}
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		task.Delete(ctx)
+		return
+	}
+	status := <-statusC
+	code, _, err := status.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 7 {
+		t.Errorf("expected status 7 from wait but received %d", code)
+	}
+
+	deleteStatus, err := task.Delete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ec := deleteStatus.ExitCode(); ec != 7 {
+		t.Errorf("expected status 7 from delete but received %d", ec)
+	}
+}
+
 func TestContainerOutput(t *testing.T) {
 	t.Parallel()
 
@@ -202,7 +323,7 @@ func TestContainerOutput(t *testing.T) {
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	stdout := bytes.NewBuffer(nil)
-	task, err := container.NewTask(ctx, cio.NewCreator(withByteBuffers(stdout)))
+	task, err := container.NewTask(ctx, cio.NewCreator(withStdout(stdout)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,12 +355,11 @@ func TestContainerOutput(t *testing.T) {
 	}
 }
 
-func withByteBuffers(stdout io.Writer) cio.Opt {
-	// TODO: could this use io.Discard?
+func withStdout(stdout io.Writer) cio.Opt {
 	return func(streams *cio.Streams) {
-		streams.Stdin = new(bytes.Buffer)
+		streams.Stdin = bytes.NewReader(nil)
 		streams.Stdout = stdout
-		streams.Stderr = new(bytes.Buffer)
+		streams.Stderr = io.Discard
 	}
 }
 
@@ -669,10 +789,6 @@ func TestKillContainerDeletedByRunc(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-
-	if client.Runtime() == plugin.RuntimeLinuxV1 {
-		t.Skip("test relies on runtime v2")
-	}
 
 	var (
 		image       Image
@@ -1142,7 +1258,7 @@ func TestContainerHostname(t *testing.T) {
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	stdout := bytes.NewBuffer(nil)
-	task, err := container.NewTask(ctx, cio.NewCreator(withByteBuffers(stdout)))
+	task, err := container.NewTask(ctx, cio.NewCreator(withStdout(stdout)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1747,7 +1863,7 @@ func TestContainerExecLargeOutputWithTTY(t *testing.T) {
 		stdout := bytes.NewBuffer(nil)
 
 		execID := t.Name() + "_exec"
-		process, err := task.Exec(ctx, execID, processSpec, cio.NewCreator(withByteBuffers(stdout), withProcessTTY()))
+		process, err := task.Exec(ctx, execID, processSpec, cio.NewCreator(withStdout(stdout), withProcessTTY()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2156,8 +2272,7 @@ func initContainerAndCheckChildrenDieOnKill(t *testing.T, opts ...oci.SpecOpts) 
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	stdout := bytes.NewBuffer(nil)
-	task, err := container.NewTask(ctx, cio.NewCreator(withByteBuffers(stdout)))
+	task, err := container.NewTask(ctx, cio.NullIO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2501,7 +2616,7 @@ func TestContainerUsername(t *testing.T) {
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	buf := bytes.NewBuffer(nil)
-	task, err := container.NewTask(ctx, cio.NewCreator(withByteBuffers(buf)))
+	task, err := container.NewTask(ctx, cio.NewCreator(withStdout(buf)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2553,7 +2668,7 @@ func TestContainerPTY(t *testing.T) {
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	buf := bytes.NewBuffer(nil)
-	task, err := container.NewTask(ctx, cio.NewCreator(withByteBuffers(buf), withProcessTTY()))
+	task, err := container.NewTask(ctx, cio.NewCreator(withStdout(buf), withProcessTTY()))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,9 +18,9 @@ package client
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -55,7 +55,7 @@ version = 2
 	}
 
 	id := t.Name()
-	container, err := client.NewContainer(ctx, id, WithNewSnapshot(id, image), WithNewSpec(oci.WithImageConfig(image), withProcessArgs("top")), WithRuntime(plugin.RuntimeRuncV1, &options.Options{
+	container, err := client.NewContainer(ctx, id, WithNewSnapshot(id, image), WithNewSpec(oci.WithImageConfig(image), withProcessArgs("top")), WithRuntime(plugin.RuntimeRuncV2, &options.Options{
 		Root: runtimeRoot,
 	}))
 	if err != nil {
@@ -133,7 +133,7 @@ func TestDaemonCustomCgroup(t *testing.T) {
 		t.Skip("skip TestDaemonCustomCgroup since no cgroup path available")
 	}
 
-	customCgroup := fmt.Sprintf("%d", time.Now().Nanosecond())
+	customCgroup := strconv.Itoa(time.Now().Nanosecond())
 	configTOML := `
 version = 2
 [cgroup]

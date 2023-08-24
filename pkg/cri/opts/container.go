@@ -21,11 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	goruntime "runtime"
 	"strings"
 
 	"github.com/containerd/continuity/fs"
+	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/containers"
@@ -57,7 +56,7 @@ func WithNewSnapshot(id string, i containerd.Image, opts ...snapshots.Opt) conta
 // WithVolumes copies ownership of volume in rootfs to its corresponding host path.
 // It doesn't update runtime spec.
 // The passed in map is a host path to container path map for all volumes.
-func WithVolumes(volumeMounts map[string]string) containerd.NewContainerOpts {
+func WithVolumes(volumeMounts map[string]string, platform imagespec.Platform) containerd.NewContainerOpts {
 	return func(ctx context.Context, client *containerd.Client, c *containers.Container) (err error) {
 		if c.Snapshotter == "" {
 			return errors.New("no snapshotter set for container")
@@ -86,53 +85,50 @@ func WithVolumes(volumeMounts map[string]string) containerd.NewContainerOpts {
 		// https://github.com/containerd/containerd/pull/1785
 		defer os.Remove(root)
 
-		unmounter := func(mountPath string) {
-			if uerr := mount.Unmount(mountPath, 0); uerr != nil {
+		if err := mount.All(mounts, root); err != nil {
+			return fmt.Errorf("failed to mount: %w", err)
+		}
+		defer func() {
+			if uerr := mount.Unmount(root, 0); uerr != nil {
 				log.G(ctx).WithError(uerr).Errorf("Failed to unmount snapshot %q", root)
 				if err == nil {
 					err = uerr
 				}
 			}
-		}
-
-		var mountPaths []string
-		if goruntime.GOOS == "windows" {
-			for _, m := range mounts {
-				// appending the layerID to the root.
-				mountPath := filepath.Join(root, filepath.Base(m.Source))
-				mountPaths = append(mountPaths, mountPath)
-				if err := m.Mount(mountPath); err != nil {
-					return err
-				}
-
-				defer unmounter(m.Source)
-			}
-		} else {
-			mountPaths = append(mountPaths, root)
-			if err := mount.All(mounts, root); err != nil {
-				return fmt.Errorf("failed to mount: %w", err)
-			}
-			defer unmounter(root)
-		}
+		}()
 
 		for host, volume := range volumeMounts {
-			// The volume may have been defined with a C: prefix, which we can't use here.
-			volume = strings.TrimPrefix(volume, "C:")
-			for _, mountPath := range mountPaths {
-				src, err := fs.RootPath(mountPath, volume)
-				if err != nil {
-					return fmt.Errorf("rootpath on mountPath %s, volume %s: %w", mountPath, volume, err)
-				}
-				if _, err := os.Stat(src); err != nil {
-					if os.IsNotExist(err) {
-						// Skip copying directory if it does not exist.
+			if platform.OS == "windows" {
+				// Windows allows volume mounts in subfolders under C: and as any other drive letter like D:, E:, etc.
+				// An image may contain files inside a folder defined as a VOLUME in a Dockerfile. On Windows, images
+				// can only contain pre-existing files for volumes situated on the root filesystem, which is C:.
+				// For any other volumes, we need to skip attempting to copy existing contents.
+				//
+				// C:\some\volume --> \some\volume
+				// D:\some\volume --> skip
+				if len(volume) >= 2 && string(volume[1]) == ":" {
+					// Perform a case insensitive comparison to "C", and skip non-C mounted volumes.
+					if !strings.EqualFold(string(volume[0]), "c") {
 						continue
 					}
-					return fmt.Errorf("stat volume in rootfs: %w", err)
+					// This is a volume mounted somewhere under C:\. We strip the drive letter and allow fs.RootPath()
+					// to append the remaining path to the rootfs path as seen by the host OS.
+					volume = volume[2:]
 				}
-				if err := copyExistingContents(src, host); err != nil {
-					return fmt.Errorf("taking runtime copy of volume: %w", err)
+			}
+			src, err := fs.RootPath(root, volume)
+			if err != nil {
+				return fmt.Errorf("rootpath on mountPath %s, volume %s: %w", root, volume, err)
+			}
+			if _, err := os.Stat(src); err != nil {
+				if os.IsNotExist(err) {
+					// Skip copying directory if it does not exist.
+					continue
 				}
+				return fmt.Errorf("stat volume in rootfs: %w", err)
+			}
+			if err := copyExistingContents(src, host); err != nil {
+				return fmt.Errorf("taking runtime copy of volume: %w", err)
 			}
 		}
 		return nil
@@ -142,7 +138,13 @@ func WithVolumes(volumeMounts map[string]string) containerd.NewContainerOpts {
 // copyExistingContents copies from the source to the destination and
 // ensures the ownership is appropriately set.
 func copyExistingContents(source, destination string) error {
-	dstList, err := os.ReadDir(destination)
+	f, err := os.Open(destination)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	dstList, err := f.Readdirnames(-1)
 	if err != nil {
 		return err
 	}

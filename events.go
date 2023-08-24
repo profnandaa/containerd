@@ -23,7 +23,7 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/protobuf"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 )
 
 // EventService handles the publish, forward and subscribe of events.
@@ -46,13 +46,13 @@ type eventRemote struct {
 }
 
 func (e *eventRemote) Publish(ctx context.Context, topic string, event events.Event) error {
-	any, err := typeurl.MarshalAny(event)
+	evt, err := typeurl.MarshalAny(event)
 	if err != nil {
 		return err
 	}
 	req := &eventsapi.PublishRequest{
 		Topic: topic,
-		Event: protobuf.FromAny(any),
+		Event: protobuf.FromAny(evt),
 	}
 	if _, err := e.client.Publish(ctx, req); err != nil {
 		return errdefs.FromGRPC(err)

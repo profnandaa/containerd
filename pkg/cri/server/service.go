@@ -24,15 +24,17 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
+	"github.com/containerd/containerd/pkg/cri/instrument"
+	"github.com/containerd/containerd/pkg/cri/nri"
 	"github.com/containerd/containerd/pkg/cri/streaming"
 	"github.com/containerd/containerd/pkg/kmutex"
-	"github.com/containerd/containerd/pkg/nri"
 	"github.com/containerd/containerd/plugin"
-	runtime_alpha "github.com/containerd/containerd/third_party/k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	cni "github.com/containerd/go-cni"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -40,7 +42,6 @@ import (
 
 	"github.com/containerd/containerd/pkg/cri/store/label"
 
-	"github.com/containerd/containerd/pkg/atomic"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
@@ -54,25 +55,16 @@ import (
 // defaultNetworkPlugin is used for the default CNI configuration
 const defaultNetworkPlugin = "default"
 
-// grpcServices are all the grpc services provided by cri containerd.
-type grpcServices interface {
-	runtime.RuntimeServiceServer
-	runtime.ImageServiceServer
-}
-
-type grpcAlphaServices interface {
-	runtime_alpha.RuntimeServiceServer
-	runtime_alpha.ImageServiceServer
-}
-
 // CRIService is the interface implement CRI remote service server.
 type CRIService interface {
-	Run() error
-
-	// io.Closer is used by containerd to gracefully stop cri service.
+	runtime.RuntimeServiceServer
+	runtime.ImageServiceServer
+	// Closer is used by containerd to gracefully stop cri service.
 	io.Closer
+
+	Run(ready func()) error
+
 	Register(*grpc.Server) error
-	grpcServices
 }
 
 // criService implements CRIService.
@@ -120,15 +112,15 @@ type criService struct {
 	// one in-flight fetch request or unpack handler for a given descriptor's
 	// or chain ID.
 	unpackDuplicationSuppressor kmutex.KeyedLocker
-
-	nri *nriAPI
+	// nri is used to hook NRI into CRI request processing.
+	nri *nri.API
 	// containerEventsChan is used to capture container events and send them
 	// to the caller of GetContainerEvents.
 	containerEventsChan chan runtime.ContainerEventResponse
 }
 
 // NewCRIService returns a new instance of CRIService
-func NewCRIService(config criconfig.Config, client *containerd.Client, nrip nri.API) (CRIService, error) {
+func NewCRIService(config criconfig.Config, client *containerd.Client, nri *nri.API) (CRIService, error) {
 	var err error
 	labels := label.NewStore()
 	c := &criService{
@@ -141,7 +133,6 @@ func NewCRIService(config criconfig.Config, client *containerd.Client, nrip nri.
 		snapshotStore:               snapshotstore.NewStore(),
 		sandboxNameIndex:            registrar.NewRegistrar(),
 		containerNameIndex:          registrar.NewRegistrar(),
-		initialized:                 atomic.NewBool(false),
 		netPlugin:                   make(map[string]cni.CNI),
 		unpackDuplicationSuppressor: kmutex.New(),
 	}
@@ -154,7 +145,7 @@ func NewCRIService(config criconfig.Config, client *containerd.Client, nrip nri.
 	}
 
 	c.imageFSPath = imageFSPath(config.ContainerdRootDir, config.ContainerdConfig.Snapshotter)
-	logrus.Infof("Get image filesystem path %q", c.imageFSPath)
+	log.L.Infof("Get image filesystem path %q", c.imageFSPath)
 
 	if err := c.initPlatform(); err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)
@@ -191,12 +182,7 @@ func NewCRIService(config criconfig.Config, client *containerd.Client, nrip nri.
 		return nil, err
 	}
 
-	if nrip != nil {
-		c.nri = &nriAPI{
-			cri: c,
-			nri: nrip,
-		}
-	}
+	c.nri = nri
 
 	return c, nil
 }
@@ -217,21 +203,21 @@ func (c *criService) RegisterTCP(s *grpc.Server) error {
 }
 
 // Run starts the CRI service.
-func (c *criService) Run() error {
-	logrus.Info("Start subscribing containerd event")
+func (c *criService) Run(ready func()) error {
+	log.L.Info("Start subscribing containerd event")
 	c.eventMonitor.subscribe(c.client)
 
-	logrus.Infof("Start recovering state")
+	log.L.Infof("Start recovering state")
 	if err := c.recover(ctrdutil.NamespacedContext()); err != nil {
 		return fmt.Errorf("failed to recover state: %w", err)
 	}
 
 	// Start event handler.
-	logrus.Info("Start event monitor")
+	log.L.Info("Start event monitor")
 	eventMonitorErrCh := c.eventMonitor.start()
 
 	// Start snapshot stats syncer, it doesn't need to be stopped.
-	logrus.Info("Start snapshots syncer")
+	log.L.Info("Start snapshots syncer")
 	snapshotsSyncer := newSnapshotsSyncer(
 		c.snapshotStore,
 		c.client.SnapshotService(c.config.ContainerdConfig.Snapshotter),
@@ -244,32 +230,43 @@ func (c *criService) Run() error {
 	var netSyncGroup sync.WaitGroup
 	for name, h := range c.cniNetConfMonitor {
 		netSyncGroup.Add(1)
-		logrus.Infof("Start cni network conf syncer for %s", name)
+		log.L.Infof("Start cni network conf syncer for %s", name)
 		go func(h *cniNetConfSyncer) {
 			cniNetConfMonitorErrCh <- h.syncLoop()
 			netSyncGroup.Done()
 		}(h)
 	}
-	go func() {
-		netSyncGroup.Wait()
-		close(cniNetConfMonitorErrCh)
-	}()
+	// For platforms that may not support CNI (darwin etc.) there's no
+	// use in launching this as `Wait` will return immediately. Further
+	// down we select on this channel along with some others to determine
+	// if we should Close() the CRI service, so closing this preemptively
+	// isn't good.
+	if len(c.cniNetConfMonitor) > 0 {
+		go func() {
+			netSyncGroup.Wait()
+			close(cniNetConfMonitorErrCh)
+		}()
+	}
 
 	// Start streaming server.
-	logrus.Info("Start streaming server")
+	log.L.Info("Start streaming server")
 	streamServerErrCh := make(chan error)
 	go func() {
 		defer close(streamServerErrCh)
 		if err := c.streamServer.Start(true); err != nil && err != http.ErrServerClosed {
-			logrus.WithError(err).Error("Failed to start streaming server")
+			log.L.WithError(err).Error("Failed to start streaming server")
 			streamServerErrCh <- err
 		}
 	}()
 
-	c.nri.register()
+	// register CRI domain with NRI
+	if err := c.nri.Register(&criImplementation{c}); err != nil {
+		return fmt.Errorf("failed to set up NRI for CRI service: %w", err)
+	}
 
 	// Set the server as initialized. GRPC services could start serving traffic.
-	c.initialized.Set()
+	c.initialized.Store(true)
+	ready()
 
 	var eventMonitorErr, streamServerErr, cniNetConfMonitorErr error
 	// Stop the whole CRI service if any of the critical service exits.
@@ -286,11 +283,11 @@ func (c *criService) Run() error {
 	if err := <-eventMonitorErrCh; err != nil {
 		eventMonitorErr = err
 	}
-	logrus.Info("Event monitor stopped")
+	log.L.Info("Event monitor stopped")
 	if err := <-streamServerErrCh; err != nil {
 		streamServerErr = err
 	}
-	logrus.Info("Stream server stopped")
+	log.L.Info("Stream server stopped")
 	if eventMonitorErr != nil {
 		return fmt.Errorf("event monitor error: %w", eventMonitorErr)
 	}
@@ -300,6 +297,7 @@ func (c *criService) Run() error {
 	if cniNetConfMonitorErr != nil {
 		return fmt.Errorf("cni network conf monitor error: %w", cniNetConfMonitorErr)
 	}
+
 	return nil
 }
 
@@ -319,20 +317,22 @@ func (c *criService) Close() error {
 	return nil
 }
 
+// IsInitialized indicates whether CRI service has finished initialization.
+func (c *criService) IsInitialized() bool {
+	return c.initialized.Load()
+}
+
 func (c *criService) register(s *grpc.Server) error {
-	instrumented := newInstrumentedService(c)
+	instrumented := instrument.NewService(c)
 	runtime.RegisterRuntimeServiceServer(s, instrumented)
 	runtime.RegisterImageServiceServer(s, instrumented)
-	instrumentedAlpha := newInstrumentedAlphaService(c)
-	runtime_alpha.RegisterRuntimeServiceServer(s, instrumentedAlpha)
-	runtime_alpha.RegisterImageServiceServer(s, instrumentedAlpha)
 	return nil
 }
 
 // imageFSPath returns containerd image filesystem path.
 // Note that if containerd changes directory layout, we also needs to change this.
 func imageFSPath(rootDir, snapshotter string) string {
-	return filepath.Join(rootDir, fmt.Sprintf("%s.%s", plugin.SnapshotPlugin, snapshotter))
+	return filepath.Join(rootDir, plugin.SnapshotPlugin.String()+"."+snapshotter)
 }
 
 func loadOCISpec(filename string) (*oci.Spec, error) {

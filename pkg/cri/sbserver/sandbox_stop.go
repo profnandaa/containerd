@@ -73,12 +73,17 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 			return fmt.Errorf("failed to get sandbox controller: %w", err)
 		}
 
-		if _, err := controller.Stop(ctx, id); err != nil {
+		if err := controller.Stop(ctx, id); err != nil {
 			return fmt.Errorf("failed to stop sandbox %q: %w", id, err)
 		}
 	}
 
 	sandboxRuntimeStopTimer.WithValues(sandbox.RuntimeHandler).UpdateSince(stop)
+
+	err := c.nri.StopPodSandbox(ctx, &sandbox)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("NRI sandbox stop notification failed")
+	}
 
 	// Teardown network for sandbox.
 	if sandbox.NetNS != nil {

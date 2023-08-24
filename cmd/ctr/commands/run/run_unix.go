@@ -19,6 +19,7 @@
 package run
 
 import (
+	"context"
 	gocontext "context"
 	"errors"
 	"fmt"
@@ -27,12 +28,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
+	"github.com/container-orchestrated-devices/container-device-interface/pkg/parser"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cmd/ctr/commands"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/contrib/apparmor"
 	"github.com/containerd/containerd/contrib/nvidia"
 	"github.com/containerd/containerd/contrib/seccomp"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
 	runtimeoptions "github.com/containerd/containerd/pkg/runtimeoptions/v1"
 	"github.com/containerd/containerd/platforms"
@@ -40,48 +44,55 @@ import (
 	"github.com/containerd/containerd/snapshots"
 	"github.com/intel/goresctrl/pkg/blockio"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
 var platformRunFlags = []cli.Flag{
 	cli.StringFlag{
 		Name:  "runc-binary",
-		Usage: "specify runc-compatible binary",
+		Usage: "Specify runc-compatible binary",
 	},
 	cli.StringFlag{
 		Name:  "runc-root",
-		Usage: "specify runc-compatible root",
+		Usage: "Specify runc-compatible root",
 	},
 	cli.BoolFlag{
 		Name:  "runc-systemd-cgroup",
-		Usage: "start runc with systemd cgroup manager",
+		Usage: "Start runc with systemd cgroup manager",
 	},
 	cli.StringFlag{
 		Name:  "uidmap",
-		Usage: "run inside a user namespace with the specified UID mapping range; specified with the format `container-uid:host-uid:length`",
+		Usage: "Run inside a user namespace with the specified UID mapping range; specified with the format `container-uid:host-uid:length`",
 	},
 	cli.StringFlag{
 		Name:  "gidmap",
-		Usage: "run inside a user namespace with the specified GID mapping range; specified with the format `container-gid:host-gid:length`",
+		Usage: "Run inside a user namespace with the specified GID mapping range; specified with the format `container-gid:host-gid:length`",
 	},
 	cli.BoolFlag{
 		Name:  "remap-labels",
-		Usage: "provide the user namespace ID remapping to the snapshotter via label options; requires snapshotter support",
+		Usage: "Provide the user namespace ID remapping to the snapshotter via label options; requires snapshotter support",
 	},
 	cli.BoolFlag{
 		Name:  "privileged-without-host-devices",
-		Usage: "don't pass all host devices to privileged container",
+		Usage: "Don't pass all host devices to privileged container",
 	},
 	cli.Float64Flag{
 		Name:  "cpus",
-		Usage: "set the CFS cpu quota",
+		Usage: "Set the CFS cpu quota",
 		Value: 0.0,
 	},
 	cli.IntFlag{
 		Name:  "cpu-shares",
-		Usage: "set the cpu shares",
+		Usage: "Set the cpu shares",
 		Value: 1024,
+	},
+	cli.StringFlag{
+		Name:  "cpuset-cpus",
+		Usage: "Set the CPUs the container will run in (e.g., 1-2,4)",
+	},
+	cli.StringFlag{
+		Name:  "cpuset-mems",
+		Usage: "Set the memory nodes the container will run in (e.g., 1-2,4)",
 	},
 }
 
@@ -102,6 +113,10 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 		cOpts []containerd.NewContainerOpts
 		spec  containerd.NewContainerOpts
 	)
+
+	if sandbox := context.String("sandbox"); sandbox != "" {
+		cOpts = append(cOpts, containerd.WithSandbox(sandbox))
+	}
 
 	if config {
 		cOpts = append(cOpts, containerd.WithContainerLabels(commands.LabelArgs(context.StringSlice("label"))))
@@ -239,10 +254,6 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 			opts = append(opts, oci.WithAnnotations(annos))
 		}
 
-		if context.Bool("cni") {
-			cniMeta := &commands.NetworkMetaData{EnableCni: true}
-			cOpts = append(cOpts, containerd.WithContainerExtension(commands.CtrCniMetadataExtension, cniMeta))
-		}
 		if caps := context.StringSlice("cap-add"); len(caps) > 0 {
 			for _, cap := range caps {
 				if !strings.HasPrefix(cap, "CAP_") {
@@ -294,6 +305,14 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 			opts = append(opts, oci.WithCPUCFS(quota, period))
 		}
 
+		if cpusetCpus := context.String("cpuset-cpus"); len(cpusetCpus) > 0 {
+			opts = append(opts, oci.WithCPUs(cpusetCpus))
+		}
+
+		if cpusetMems := context.String("cpuset-mems"); len(cpusetMems) > 0 {
+			opts = append(opts, oci.WithCPUsMems(cpusetMems))
+		}
+
 		if shares := context.Int("cpu-shares"); shares > 0 {
 			opts = append(opts, oci.WithCPUShares(uint64(shares)))
 		}
@@ -335,9 +354,18 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 		if limit != 0 {
 			opts = append(opts, oci.WithMemoryLimit(limit))
 		}
+		var cdiDeviceIDs []string
 		for _, dev := range context.StringSlice("device") {
+			if parser.IsQualifiedName(dev) {
+				cdiDeviceIDs = append(cdiDeviceIDs, dev)
+				continue
+			}
 			opts = append(opts, oci.WithDevices(dev, "", "rwm"))
 		}
+		if len(cdiDeviceIDs) > 0 {
+			opts = append(opts, withStaticCDIRegistry())
+		}
+		opts = append(opts, oci.WithCDIDevices(cdiDeviceIDs...))
 
 		rootfsPropagation := context.String("rootfs-propagation")
 		if rootfsPropagation != "" {
@@ -373,6 +401,11 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 		if hostname := context.String("hostname"); hostname != "" {
 			opts = append(opts, oci.WithHostname(hostname))
 		}
+	}
+
+	if context.Bool("cni") {
+		cniMeta := &commands.NetworkMetaData{EnableCni: true}
+		cOpts = append(cOpts, containerd.WithContainerExtension(commands.CtrCniMetadataExtension, cniMeta))
 	}
 
 	runtimeOpts, err := getRuntimeOptions(context)
@@ -431,30 +464,6 @@ func getRuntimeOptions(context *cli.Context) (interface{}, error) {
 	return nil, nil
 }
 
-func getNewTaskOpts(context *cli.Context) []containerd.NewTaskOpts {
-	var (
-		tOpts []containerd.NewTaskOpts
-	)
-	if context.Bool("no-pivot") {
-		tOpts = append(tOpts, containerd.WithNoPivotRoot)
-	}
-	if uidmap := context.String("uidmap"); uidmap != "" {
-		uidMap, err := parseIDMapping(uidmap)
-		if err != nil {
-			logrus.WithError(err).Warn("unable to parse uidmap; defaulting to uid 0 IO ownership")
-		}
-		tOpts = append(tOpts, containerd.WithUIDOwner(uidMap.HostID))
-	}
-	if gidmap := context.String("gidmap"); gidmap != "" {
-		gidMap, err := parseIDMapping(gidmap)
-		if err != nil {
-			logrus.WithError(err).Warn("unable to parse gidmap; defaulting to gid 0 IO ownership")
-		}
-		tOpts = append(tOpts, containerd.WithGIDOwner(gidMap.HostID))
-	}
-	return tOpts
-}
-
 func parseIDMapping(mapping string) (specs.LinuxIDMapping, error) {
 	// We expect 3 parts, but limit to 4 to allow detection of invalid values.
 	parts := strings.SplitN(mapping, ":", 4)
@@ -498,4 +507,22 @@ func validNamespace(ns string) bool {
 
 func getNetNSPath(_ gocontext.Context, task containerd.Task) (string, error) {
 	return fmt.Sprintf("/proc/%d/ns/net", task.Pid()), nil
+}
+
+// withStaticCDIRegistry inits the CDI registry and disables auto-refresh.
+// This is used from the `run` command to avoid creating a registry with auto-refresh enabled.
+// It also provides a way to override the CDI spec file paths if required.
+func withStaticCDIRegistry() oci.SpecOpts {
+	return func(ctx context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		registry := cdi.GetRegistry(cdi.WithAutoRefresh(false))
+		if err := registry.Refresh(); err != nil {
+			// We don't consider registry refresh failure a fatal error.
+			// For instance, a dynamically generated invalid CDI Spec file for
+			// any particular vendor shouldn't prevent injection of devices of
+			// different vendors. CDI itself knows better and it will fail the
+			// injection if necessary.
+			log.G(ctx).Warnf("CDI registry refresh failed: %v", err)
+		}
+		return nil
+	}
 }

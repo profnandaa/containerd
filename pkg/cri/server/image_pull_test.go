@@ -22,11 +22,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
-
 	"github.com/containerd/containerd/pkg/cri/annotations"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	"github.com/containerd/containerd/pkg/cri/labels"
+
+	"github.com/stretchr/testify/assert"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 func TestParseAuth(t *testing.T) {
@@ -37,23 +38,29 @@ func TestParseAuth(t *testing.T) {
 	base64.StdEncoding.Encode(testAuth, []byte(testUser+":"+testPasswd))
 	invalidAuth := make([]byte, testAuthLen)
 	base64.StdEncoding.Encode(invalidAuth, []byte(testUser+"@"+testPasswd))
-	for desc, test := range map[string]struct {
+	for _, test := range []struct {
+		desc           string
 		auth           *runtime.AuthConfig
 		host           string
 		expectedUser   string
 		expectedSecret string
 		expectErr      bool
 	}{
-		"should not return error if auth config is nil": {},
-		"should not return error if empty auth is provided for access to anonymous registry": {
+		{
+			desc: "should not return error if auth config is nil",
+		},
+		{
+			desc:      "should not return error if empty auth is provided for access to anonymous registry",
 			auth:      &runtime.AuthConfig{},
 			expectErr: false,
 		},
-		"should support identity token": {
+		{
+			desc:           "should support identity token",
 			auth:           &runtime.AuthConfig{IdentityToken: "abcd"},
 			expectedSecret: "abcd",
 		},
-		"should support username and password": {
+		{
+			desc: "should support username and password",
 			auth: &runtime.AuthConfig{
 				Username: testUser,
 				Password: testPasswd,
@@ -61,16 +68,19 @@ func TestParseAuth(t *testing.T) {
 			expectedUser:   testUser,
 			expectedSecret: testPasswd,
 		},
-		"should support auth": {
+		{
+			desc:           "should support auth",
 			auth:           &runtime.AuthConfig{Auth: string(testAuth)},
 			expectedUser:   testUser,
 			expectedSecret: testPasswd,
 		},
-		"should return error for invalid auth": {
+		{
+			desc:      "should return error for invalid auth",
 			auth:      &runtime.AuthConfig{Auth: string(invalidAuth)},
 			expectErr: true,
 		},
-		"should return empty auth if server address doesn't match": {
+		{
+			desc: "should return empty auth if server address doesn't match",
 			auth: &runtime.AuthConfig{
 				Username:      testUser,
 				Password:      testPasswd,
@@ -80,7 +90,8 @@ func TestParseAuth(t *testing.T) {
 			expectedUser:   "",
 			expectedSecret: "",
 		},
-		"should return auth if server address matches": {
+		{
+			desc: "should return auth if server address matches",
 			auth: &runtime.AuthConfig{
 				Username:      testUser,
 				Password:      testPasswd,
@@ -90,7 +101,8 @@ func TestParseAuth(t *testing.T) {
 			expectedUser:   testUser,
 			expectedSecret: testPasswd,
 		},
-		"should return auth if server address is not specified": {
+		{
+			desc: "should return auth if server address is not specified",
 			auth: &runtime.AuthConfig{
 				Username: testUser,
 				Password: testPasswd,
@@ -100,7 +112,8 @@ func TestParseAuth(t *testing.T) {
 			expectedSecret: testPasswd,
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			u, s, err := ParseAuth(test.auth, test.host)
 			assert.Equal(t, test.expectErr, err != nil)
 			assert.Equal(t, test.expectedUser, u)
@@ -110,12 +123,14 @@ func TestParseAuth(t *testing.T) {
 }
 
 func TestRegistryEndpoints(t *testing.T) {
-	for desc, test := range map[string]struct {
+	for _, test := range []struct {
+		desc     string
 		mirrors  map[string]criconfig.Mirror
 		host     string
 		expected []string
 	}{
-		"no mirror configured": {
+		{
+			desc: "no mirror configured",
 			mirrors: map[string]criconfig.Mirror{
 				"registry-1.io": {
 					Endpoints: []string{
@@ -129,7 +144,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"https://registry-3.io",
 			},
 		},
-		"mirror configured": {
+		{
+			desc: "mirror configured",
 			mirrors: map[string]criconfig.Mirror{
 				"registry-3.io": {
 					Endpoints: []string{
@@ -145,7 +161,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"https://registry-3.io",
 			},
 		},
-		"wildcard mirror configured": {
+		{
+			desc: "wildcard mirror configured",
 			mirrors: map[string]criconfig.Mirror{
 				"*": {
 					Endpoints: []string{
@@ -161,7 +178,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"https://registry-3.io",
 			},
 		},
-		"host should take precedence if both host and wildcard mirrors are configured": {
+		{
+			desc: "host should take precedence if both host and wildcard mirrors are configured",
 			mirrors: map[string]criconfig.Mirror{
 				"*": {
 					Endpoints: []string{
@@ -180,7 +198,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"https://registry-3.io",
 			},
 		},
-		"default endpoint in list with http": {
+		{
+			desc: "default endpoint in list with http",
 			mirrors: map[string]criconfig.Mirror{
 				"registry-3.io": {
 					Endpoints: []string{
@@ -197,7 +216,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"http://registry-3.io",
 			},
 		},
-		"default endpoint in list with https": {
+		{
+			desc: "default endpoint in list with https",
 			mirrors: map[string]criconfig.Mirror{
 				"registry-3.io": {
 					Endpoints: []string{
@@ -214,7 +234,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"https://registry-3.io",
 			},
 		},
-		"default endpoint in list with path": {
+		{
+			desc: "default endpoint in list with path",
 			mirrors: map[string]criconfig.Mirror{
 				"registry-3.io": {
 					Endpoints: []string{
@@ -231,7 +252,8 @@ func TestRegistryEndpoints(t *testing.T) {
 				"https://registry-3.io/path",
 			},
 		},
-		"miss scheme endpoint in list with path": {
+		{
+			desc: "miss scheme endpoint in list with path",
 			mirrors: map[string]criconfig.Mirror{
 				"registry-3.io": {
 					Endpoints: []string{
@@ -249,7 +271,8 @@ func TestRegistryEndpoints(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			c := newTestCRIService()
 			c.config.Registry.Mirrors = test.mirrors
 			got, err := c.registryEndpoints(test.host)
@@ -260,52 +283,64 @@ func TestRegistryEndpoints(t *testing.T) {
 }
 
 func TestDefaultScheme(t *testing.T) {
-	for desc, test := range map[string]struct {
+	for _, test := range []struct {
+		desc     string
 		host     string
 		expected string
 	}{
-		"should use http by default for localhost": {
+		{
+			desc:     "should use http by default for localhost",
 			host:     "localhost",
 			expected: "http",
 		},
-		"should use http by default for localhost with port": {
+		{
+			desc:     "should use http by default for localhost with port",
 			host:     "localhost:8080",
 			expected: "http",
 		},
-		"should use http by default for 127.0.0.1": {
+		{
+			desc:     "should use http by default for 127.0.0.1",
 			host:     "127.0.0.1",
 			expected: "http",
 		},
-		"should use http by default for 127.0.0.1 with port": {
+		{
+			desc:     "should use http by default for 127.0.0.1 with port",
 			host:     "127.0.0.1:8080",
 			expected: "http",
 		},
-		"should use http by default for ::1": {
+		{
+			desc:     "should use http by default for ::1",
 			host:     "::1",
 			expected: "http",
 		},
-		"should use http by default for ::1 with port": {
+		{
+			desc:     "should use http by default for ::1 with port",
 			host:     "[::1]:8080",
 			expected: "http",
 		},
-		"should use https by default for remote host": {
+		{
+			desc:     "should use https by default for remote host",
 			host:     "remote",
 			expected: "https",
 		},
-		"should use https by default for remote host with port": {
+		{
+			desc:     "should use https by default for remote host with port",
 			host:     "remote:8080",
 			expected: "https",
 		},
-		"should use https by default for remote ip": {
+		{
+			desc:     "should use https by default for remote ip",
 			host:     "8.8.8.8",
 			expected: "https",
 		},
-		"should use https by default for remote ip with port": {
+		{
+			desc:     "should use https by default for remote ip with port",
 			host:     "8.8.8.8:8080",
 			expected: "https",
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			got := defaultScheme(test.host)
 			assert.Equal(t, test.expected, got)
 		})
@@ -313,20 +348,24 @@ func TestDefaultScheme(t *testing.T) {
 }
 
 func TestEncryptedImagePullOpts(t *testing.T) {
-	for desc, test := range map[string]struct {
+	for _, test := range []struct {
+		desc         string
 		keyModel     string
 		expectedOpts int
 	}{
-		"node key model should return one unpack opt": {
+		{
+			desc:         "node key model should return one unpack opt",
 			keyModel:     criconfig.KeyModelNode,
 			expectedOpts: 1,
 		},
-		"no key model selected should default to node key model": {
+		{
+			desc:         "no key model selected should default to node key model",
 			keyModel:     "",
 			expectedOpts: 0,
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			c := newTestCRIService()
 			c.config.ImageDecryption.KeyModel = test.keyModel
 			got := len(c.encryptedImagesPullOpts())
@@ -382,6 +421,7 @@ func TestSnapshotterFromPodSandboxConfig(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.desc, func(t *testing.T) {
 			cri := newTestCRIService()
 			cri.config.ContainerdConfig.Snapshotter = defaultSnashotter
@@ -392,6 +432,54 @@ func TestSnapshotterFromPodSandboxConfig(t *testing.T) {
 			snapshotter, err := cri.snapshotterFromPodSandboxConfig(context.Background(), "test-image", tt.podSandboxConfig)
 			assert.Equal(t, tt.expectSnapshotter, snapshotter)
 			assert.Equal(t, tt.expectErr, err)
+		})
+	}
+}
+func TestImageGetLabels(t *testing.T) {
+	tests := []struct {
+		name               string
+		expectedLabel      map[string]string
+		configSandboxImage string
+		pullImageName      string
+	}{
+		{
+			name:               "pinned image labels should get added on sandbox image",
+			expectedLabel:      map[string]string{labels.ImageLabelKey: labels.ImageLabelValue, labels.PinnedImageLabelKey: labels.PinnedImageLabelValue},
+			configSandboxImage: "registry.k8s.io/pause:3.9",
+			pullImageName:      "registry.k8s.io/pause:3.9",
+		},
+		{
+			name:               "pinned image labels should get added on sandbox image without tag",
+			expectedLabel:      map[string]string{labels.ImageLabelKey: labels.ImageLabelValue, labels.PinnedImageLabelKey: labels.PinnedImageLabelValue},
+			configSandboxImage: "registry.k8s.io/pause",
+			pullImageName:      "registry.k8s.io/pause:latest",
+		},
+		{
+			name:               "pinned image labels should get added on sandbox image specified with tag and digest both",
+			expectedLabel:      map[string]string{labels.ImageLabelKey: labels.ImageLabelValue, labels.PinnedImageLabelKey: labels.PinnedImageLabelValue},
+			configSandboxImage: "registry.k8s.io/pause:3.9@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097",
+			pullImageName:      "registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097",
+		},
+		{
+			name:               "pinned image labels should get added on sandbox image specified with digest",
+			expectedLabel:      map[string]string{labels.ImageLabelKey: labels.ImageLabelValue, labels.PinnedImageLabelKey: labels.PinnedImageLabelValue},
+			configSandboxImage: "registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097",
+			pullImageName:      "registry.k8s.io/pause@sha256:7031c1b283388d2c2e09b57badb803c05ebed362dc88d84b480cc47f72a21097",
+		},
+		{
+			name:               "pinned image labels should not get added on other image",
+			expectedLabel:      map[string]string{labels.ImageLabelKey: labels.ImageLabelValue},
+			configSandboxImage: "registry.k8s.io/pause:3.9",
+			pullImageName:      "registry.k8s.io/random:latest",
+		},
+	}
+
+	svc := newTestCRIService()
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			svc.config.SandboxImage = tc.configSandboxImage
+			assert.Equal(t, tc.expectedLabel, svc.getLabels(context.Background(), tc.pullImageName))
 		})
 	}
 }

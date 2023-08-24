@@ -27,6 +27,7 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	imagelist "github.com/containerd/containerd/integration/images"
+	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -105,7 +106,7 @@ func TestImagePullWithDistSourceLabel(t *testing.T) {
 	defer client.ImageService().Delete(ctx, imageName)
 
 	cs := client.ContentStore()
-	key := fmt.Sprintf("containerd.io/distribution.source.%s", source)
+	key := labels.LabelDistributionSource + "." + source
 
 	// only check the target platform
 	childrenHandler := images.LimitManifests(images.ChildrenHandler(cs), pMatcher, 1)
@@ -234,7 +235,7 @@ func TestImageSupportedBySnapshotter_Error(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		unsupportedImage = "registry.k8s.io/pause-amd64:3.2"
 	} else {
-		unsupportedImage = "mcr.microsoft.com/windows/nanoserver:1809"
+		unsupportedImage = "ghcr.io/containerd/windows/nanoserver:1809"
 	}
 
 	ctx, cancel := testContext(t)

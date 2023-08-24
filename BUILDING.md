@@ -4,19 +4,32 @@ This guide is useful if you intend to contribute on containerd. Thanks for your
 effort. Every contribution is very appreciated.
 
 This doc includes:
+* [Getting started with GitHub Codespaces](#getting-started-with-gitHub-codespaces)
 * [Build requirements](#build-requirements)
 * [Build the development environment](#build-the-development-environment)
 * [Build containerd](#build-containerd)
 * [Via docker container](#via-docker-container)
 * [Testing](#testing-containerd)
 
+## Getting started with GitHub Codespaces
+
+To get started, create a codespace for this repository by clicking this 👇
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=46089560)
+
+A codespace will open in a web-based version of Visual Studio Code. The [dev container](.devcontainer/devcontainer.json) is fully configured with software needed for this project and the containerd built. If you use a codespace, then you can directly skip to the [testing](#testing-containerd) section of this document.
+
+**Note**: Dev containers is an open spec which is supported by [GitHub Codespaces](https://github.com/codespaces) and [other tools](https://containers.dev/supporting).
+
 ## Build requirements
 
 To build the `containerd` daemon, and the `ctr` simple test client, the following build system dependencies are required:
 
-* Go 1.18.x or above
+* Go 1.20.x or above
 * Protoc 3.x compiler and headers (download at the [Google protobuf releases page](https://github.com/protocolbuffers/protobuf/releases))
 * Btrfs headers and libraries for your distribution. Note that building the btrfs driver can be disabled via the build tag `no_btrfs`, removing this dependency.
+
+> *Note*: On macOS, you need a third party runtime to run containers on containerd
 
 ## Build the development environment
 
@@ -30,23 +43,18 @@ You need `git` to checkout the source code:
 git clone https://github.com/containerd/containerd
 ```
 
-For proper results, install the `protoc` release into `/usr/local` on your build system. For example, the following commands will download and install the 3.11.4 release for a 64-bit Linux host:
+For proper results, install the `protoc` release into `/usr/local` on your build system. When generating source code from `.proto` files, containerd may rely on some external protocol buffer files. These external dependencies should be added to the `/usr/local/include` directory. To install the appropriate version of `protoc` and download any necessary external protocol buffer files on a Linux host, run the install script located at `script/setup/install-protobuf`.
 
-```sh
-wget -c https://github.com/protocolbuffers/protobuf/releases/download/v3.11.4/protoc-3.11.4-linux-x86_64.zip
-sudo unzip protoc-3.11.4-linux-x86_64.zip -d /usr/local
-```
+To enable optional [Btrfs](https://en.wikipedia.org/wiki/Btrfs) snapshotter, you should have the headers from the Linux kernel 4.12 or later.
+The dependency on the kernel headers only affects users building containerd from source.
+Users on older kernels may opt to not compile the btrfs support (see `BUILDTAGS=no_btrfs` below),
+or to provide headers from a newer kernel.
 
-`containerd` uses [Btrfs](https://en.wikipedia.org/wiki/Btrfs) it means that you
-need to satisfy these dependencies in your system:
-
-* CentOS 7 / Fedora: `yum install btrfs-progs-devel`
-  * Note with CentOS 9: [Btrfs has been deprecated](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/storage_administration_guide/ch-btrfs) in RHEL / CentOS 7.4, and removed in RHEL/CentOS 9 .
-    Please see the [release notes](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/7.4_release_notes/chap-red_hat_enterprise_linux-7.4_release_notes-deprecated_functionality_in_rhel7#idm139789147351408) for additional information on deprecated features.
-* Debian/Ubuntu: `apt-get install btrfs-progs libbtrfs-dev`
-  * Debian(before Buster)/Ubuntu(before 19.10): `apt-get install btrfs-tools`
-* For unsupported [Btrfs](https://en.wikipedia.org/wiki/Btrfs) system:
-  * Use the `no_btrfs` build tag to build without btrfs support.
+> **Note**
+> The dependency on the Linux kernel headers 4.12 was introduced in containerd 1.7.0-beta.4.
+>
+> containerd 1.6 has different set of dependencies for enabling btrfs.
+> containerd 1.6 users should refer to https://github.com/containerd/containerd/blob/release/1.6/BUILDING.md#build-the-development-environment
 
 At this point you are ready to build `containerd` yourself!
 
@@ -57,6 +65,8 @@ run containerd. While it is okay to download a `runc` binary and install that on
 the system, sometimes it is necessary to build runc directly when working with
 container runtime development. Make sure to follow the guidelines for versioning
 in [RUNC.md](/docs/RUNC.md) for the best results.
+
+> *Note*: Runc only supports Linux
 
 ## Build containerd
 
@@ -106,10 +116,12 @@ make generate
 > * `no_cri`: A build tag disables building Kubernetes [CRI](http://blog.kubernetes.io/2016/12/container-runtime-interface-cri-in-kubernetes.html) support into containerd.
 > See [here](https://github.com/containerd/cri-containerd#build-tags) for build tags of CRI plugin.
 > * snapshotters (alphabetical order)
->   * `no_aufs`: A build tag disables building the aufs snapshot driver.
+>   * `no_aufs`: A build tag disables building the aufs snapshot driver. (Ignored since containerd v2.0, as the aufs snapshot driver is no longer supported)
 >   * `no_btrfs`: A build tag disables building the Btrfs snapshot driver.
 >   * `no_devmapper`: A build tag disables building the device mapper snapshot driver.
 >   * `no_zfs`: A build tag disables building the ZFS snapshot driver.
+> * platform
+>   * `no_systemd`: disables any systemd specific code
 >
 > For example, adding `BUILDTAGS=no_btrfs` to your environment before calling the **binaries**
 > Makefile target will disable the btrfs driver within the containerd Go build.
@@ -120,6 +132,8 @@ and `go mod vendor` to ensure the `go.mod`, `go.sum` files and `vendor` director
 Changes to these files should become a single commit for a PR which relies on vendored updates.
 
 Please refer to [RUNC.md](/docs/RUNC.md) for the currently supported version of `runc` that is used by containerd.
+
+> *Note*: On macOS, the containerd daemon can be built and run natively. However, as stated above, runc only supports linux.
 
 ### Static binaries
 
@@ -145,9 +159,6 @@ You can build an image from this `Dockerfile`:
 
 ```dockerfile
 FROM golang
-
-RUN apt-get update && \
-    apt-get install -y libbtrfs-dev
 ```
 
 Let's suppose that you built an image called `containerd/build`. From the
@@ -184,7 +195,7 @@ We can build an image from this `Dockerfile`:
 FROM golang
 
 RUN apt-get update && \
-    apt-get install -y libbtrfs-dev libseccomp-dev
+    apt-get install -y libseccomp-dev
 ```
 
 In our Docker container we will build `runc` build, which includes

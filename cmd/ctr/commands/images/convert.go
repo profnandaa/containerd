@@ -24,13 +24,12 @@ import (
 	"github.com/containerd/containerd/images/converter"
 	"github.com/containerd/containerd/images/converter/uncompress"
 	"github.com/containerd/containerd/platforms"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/urfave/cli"
 )
 
 var convertCommand = cli.Command{
 	Name:      "convert",
-	Usage:     "convert an image",
+	Usage:     "Convert an image",
 	ArgsUsage: "[flags] <source_ref> <target_ref>",
 	Description: `Convert an image format.
 
@@ -43,11 +42,11 @@ When '--all-platforms' is given all images in a manifest list must be available.
 		// generic flags
 		cli.BoolFlag{
 			Name:  "uncompress",
-			Usage: "convert tar.gz layers to uncompressed tar layers",
+			Usage: "Convert tar.gz layers to uncompressed tar layers",
 		},
 		cli.BoolFlag{
 			Name:  "oci",
-			Usage: "convert Docker media types to OCI media types",
+			Usage: "Convert Docker media types to OCI media types",
 		},
 		// platform flags
 		cli.StringSliceFlag{
@@ -57,7 +56,7 @@ When '--all-platforms' is given all images in a manifest list must be available.
 		},
 		cli.BoolFlag{
 			Name:  "all-platforms",
-			Usage: "exports content from all platforms",
+			Usage: "Exports content from all platforms",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -70,13 +69,9 @@ When '--all-platforms' is given all images in a manifest list must be available.
 
 		if !context.Bool("all-platforms") {
 			if pss := context.StringSlice("platform"); len(pss) > 0 {
-				var all []ocispec.Platform
-				for _, ps := range pss {
-					p, err := platforms.Parse(ps)
-					if err != nil {
-						return fmt.Errorf("invalid platform %q: %w", ps, err)
-					}
-					all = append(all, p)
+				all, err := platforms.ParseAll(pss)
+				if err != nil {
+					return err
 				}
 				convertOpts = append(convertOpts, converter.WithPlatform(platforms.Ordered(all...)))
 			} else {

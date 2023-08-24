@@ -22,7 +22,7 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 )
 
 func init() {
@@ -36,7 +36,7 @@ const (
 	CtrCniMetadataExtension = "ctr.cni-containerd.metadata"
 )
 
-// ctr pass cni network metadata to containerd if ctr run use option of --cni
+// NetworkMetaData ctr pass cni network metadata to containerd if ctr run use option of --cni
 type NetworkMetaData struct {
 	EnableCni bool
 }

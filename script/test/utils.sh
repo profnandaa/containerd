@@ -39,11 +39,23 @@ CONTAINERD_RUNTIME=${CONTAINERD_RUNTIME:-""}
 if [ -z "${CONTAINERD_CONFIG_FILE}" ]; then
   config_file="${CONTAINERD_CONFIG_DIR}/containerd-config-cri.toml"
   truncate --size 0 "${config_file}"
-  echo "version=2" >> ${config_file}
+  # TODO(fuweid): if the config.Imports supports patch update, it will be easy
+  # to write the integration test case with different configuration, like:
+  #
+  # 1. write configuration into importable containerd config path.
+  # 2. restart containerd
+  # 3. verify the behaviour
+  # 4. delete the configuration
+  # 5. restart containerd
+  cat >>${config_file} <<EOF
+version=2
+
+[plugins."io.containerd.grpc.v1.cri"]
+  drain_exec_sync_io_timeout = "10s"
+EOF
 
   if command -v sestatus >/dev/null 2>&1; then
     cat >>${config_file} <<EOF
-[plugins."io.containerd.grpc.v1.cri"]
   enable_selinux = true
 EOF
   fi
@@ -203,9 +215,9 @@ run_containerd() {
   CMD=""
   if [ -n "${sudo}" ]; then
     CMD+="${sudo} "
-    # sudo strips environment variables, so add ENABLE_CRI_SANDBOXES back if present
-    if [ -n  "${ENABLE_CRI_SANDBOXES}" ]; then
-      CMD+="ENABLE_CRI_SANDBOXES='${ENABLE_CRI_SANDBOXES}' "
+    # sudo strips environment variables, so add DISABLE_CRI_SANDBOXES back if present
+    if [ -n  "${DISABLE_CRI_SANDBOXES}" ]; then
+      CMD+="DISABLE_CRI_SANDBOXES='${DISABLE_CRI_SANDBOXES}' "
     fi
   fi
   CMD+="${PWD}/bin/containerd"

@@ -24,12 +24,12 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/pkg/cri/nri"
 	"github.com/containerd/containerd/pkg/cri/sbserver"
-	"github.com/containerd/containerd/pkg/nri"
+	nriservice "github.com/containerd/containerd/pkg/nri"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sirupsen/logrus"
 	"k8s.io/klog/v2"
 
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
@@ -54,8 +54,9 @@ func init() {
 }
 
 func initCRIService(ic *plugin.InitContext) (interface{}, error) {
+	ready := ic.RegisterReadiness()
 	ic.Meta.Platforms = []imagespec.Platform{platforms.DefaultSpec()}
-	ic.Meta.Exports = map[string]string{"CRIVersion": constants.CRIVersion, "CRIVersionAlpha": constants.CRIVersionAlpha}
+	ic.Meta.Exports = map[string]string{"CRIVersion": constants.CRIVersion}
 	ctx := ic.Context
 	pluginConfig := ic.Config.(*criconfig.PluginConfig)
 	if err := criconfig.ValidatePluginConfig(ctx, pluginConfig); err != nil {
@@ -87,82 +88,71 @@ func initCRIService(ic *plugin.InitContext) (interface{}, error) {
 	}
 
 	var s server.CRIService
-	var nrip nri.API
-	if os.Getenv("ENABLE_CRI_SANDBOXES") != "" {
-		log.G(ctx).Info("using experimental CRI Sandbox server - unset ENABLE_CRI_SANDBOXES to disable")
-		s, err = sbserver.NewCRIService(c, client)
+	if os.Getenv("DISABLE_CRI_SANDBOXES") == "" {
+		log.G(ctx).Info("using CRI Sandbox server - use DISABLE_CRI_SANDBOXES=1 to fallback to legacy CRI")
+		s, err = sbserver.NewCRIService(c, client, getNRIAPI(ic))
 	} else {
 		log.G(ctx).Info("using legacy CRI server")
-
-		nrip, err = getNRIPlugin(ic)
-		if err != nil {
-			log.G(ctx).Info("NRI service not found, disabling NRI support")
-		}
-
-		s, err = server.NewCRIService(c, client, nrip)
+		s, err = server.NewCRIService(c, client, getNRIAPI(ic))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CRI service: %w", err)
 	}
 
 	go func() {
-		if err := s.Run(); err != nil {
+		if err := s.Run(ready); err != nil {
 			log.G(ctx).WithError(err).Fatal("Failed to run CRI service")
 		}
 		// TODO(random-liu): Whether and how we can stop containerd.
 	}()
-
-	if nrip != nil {
-		log.G(ctx).Info("using experimental NRI integration - disable nri plugin to prevent this")
-		if err = nrip.Start(); err != nil {
-			log.G(ctx).WithError(err).Fatal("Failed to start NRI service")
-		}
-	}
 
 	return s, nil
 }
 
 // Set glog level.
 func setGLogLevel() error {
-	l := logrus.GetLevel()
+	l := log.GetLevel()
 	fs := flag.NewFlagSet("klog", flag.PanicOnError)
 	klog.InitFlags(fs)
 	if err := fs.Set("logtostderr", "true"); err != nil {
 		return err
 	}
 	switch l {
-	case logrus.TraceLevel:
+	case log.TraceLevel:
 		return fs.Set("v", "5")
-	case logrus.DebugLevel:
+	case log.DebugLevel:
 		return fs.Set("v", "4")
-	case logrus.InfoLevel:
+	case log.InfoLevel:
 		return fs.Set("v", "2")
-	// glog doesn't support following filters. Defaults to v=0.
-	case logrus.WarnLevel:
-	case logrus.ErrorLevel:
-	case logrus.FatalLevel:
-	case logrus.PanicLevel:
+	default:
+		// glog doesn't support other filters. Defaults to v=0.
 	}
 	return nil
 }
 
-// Get the NRI plugin and verify its type.
-func getNRIPlugin(ic *plugin.InitContext) (nri.API, error) {
+// Get the NRI plugin, and set up our NRI API for it.
+func getNRIAPI(ic *plugin.InitContext) *nri.API {
 	const (
 		pluginType = plugin.NRIApiPlugin
 		pluginName = "nri"
 	)
 
+	ctx := ic.Context
+
 	p, err := ic.GetByID(pluginType, pluginName)
 	if err != nil {
-		return nil, err
+		log.G(ctx).Info("NRI service not found, NRI support disabled")
+		return nil
 	}
 
-	api, ok := p.(nri.API)
+	api, ok := p.(nriservice.API)
 	if !ok {
-		return nil, fmt.Errorf("NRI plugin (%s, %q) has incompatible type %T",
+		log.G(ctx).Infof("NRI plugin (%s, %q) has incorrect type %T, NRI support disabled",
 			pluginType, pluginName, api)
+		return nil
 	}
 
-	return api, nil
+	log.G(ctx).Info("using experimental NRI integration - disable nri plugin to prevent this")
+
+	return nri.NewAPI(api)
 }

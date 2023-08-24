@@ -30,11 +30,12 @@ var (
 	sandboxRuntimeStopTimer   metrics.LabeledTimer
 	sandboxRemoveTimer        metrics.LabeledTimer
 
-	containerListTimer   metrics.Timer
-	containerRemoveTimer metrics.LabeledTimer
-	containerCreateTimer metrics.LabeledTimer
-	containerStopTimer   metrics.LabeledTimer
-	containerStartTimer  metrics.LabeledTimer
+	containerListTimer          metrics.Timer
+	containerRemoveTimer        metrics.LabeledTimer
+	containerCreateTimer        metrics.LabeledTimer
+	containerStopTimer          metrics.LabeledTimer
+	containerStartTimer         metrics.LabeledTimer
+	containerEventsDroppedCount metrics.Counter
 
 	networkPluginOperations        metrics.LabeledCounter
 	networkPluginOperationsErrors  metrics.LabeledCounter
@@ -42,13 +43,18 @@ var (
 
 	imagePulls           metrics.LabeledCounter
 	inProgressImagePulls metrics.Gauge
-	//  pull duration / (image size / 1MBi)
+	// image size in MB / image pull duration in seconds
 	imagePullThroughput prom.Histogram
 )
 
 func init() {
+	const (
+		namespace = "containerd"
+		subsystem = "cri"
+	)
+
 	// these CRI metrics record latencies for successful operations around a sandbox and container's lifecycle.
-	ns := metrics.NewNamespace("containerd", "cri", nil)
+	ns := metrics.NewNamespace(namespace, subsystem, nil)
 
 	sandboxListTimer = ns.NewTimer("sandbox_list", "time to list sandboxes")
 	sandboxCreateNetworkTimer = ns.NewTimer("sandbox_create_network", "time to create the network for a sandbox")
@@ -63,6 +69,7 @@ func init() {
 	containerCreateTimer = ns.NewLabeledTimer("container_create", "time to create a container", "runtime")
 	containerStopTimer = ns.NewLabeledTimer("container_stop", "time to stop a container", "runtime")
 	containerStartTimer = ns.NewLabeledTimer("container_start", "time to start a container", "runtime")
+	containerEventsDroppedCount = ns.NewCounter("container_events_dropped", "count container discarding event total from server start")
 
 	networkPluginOperations = ns.NewLabeledCounter("network_plugin_operations_total", "cumulative number of network plugin operations by operation type", "operation_type")
 	networkPluginOperationsErrors = ns.NewLabeledCounter("network_plugin_operations_errors_total", "cumulative number of network plugin operations by operation type", "operation_type")
@@ -72,12 +79,15 @@ func init() {
 	inProgressImagePulls = ns.NewGauge("in_progress_image_pulls", "in progress pulls", metrics.Total)
 	imagePullThroughput = prom.NewHistogram(
 		prom.HistogramOpts{
-			Name:    "image_pulling_throughput",
-			Help:    "image pull throughput",
-			Buckets: prom.DefBuckets,
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "image_pulling_throughput",
+			Help:      "image pull throughput",
+			Buckets:   prom.DefBuckets,
 		},
 	)
 
+	ns.Add(imagePullThroughput)
 	metrics.Register(ns)
 }
 

@@ -19,13 +19,15 @@ package testsuite
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"os"
 
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/pkg/randutil"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/continuity/fs/fstest"
 )
+
+const umountflags int = 0
 
 func applyToMounts(m []mount.Mount, work string, a fstest.Applier) (err error) {
 	td, err := os.MkdirTemp(work, "prepare")
@@ -49,7 +51,7 @@ func applyToMounts(m []mount.Mount, work string, a fstest.Applier) (err error) {
 // createSnapshot creates a new snapshot in the snapshotter
 // given an applier to run on top of the given parent.
 func createSnapshot(ctx context.Context, sn snapshots.Snapshotter, parent, work string, a fstest.Applier) (string, error) {
-	n := fmt.Sprintf("%p-%d", a, rand.Int())
+	n := fmt.Sprintf("%p-%d", a, randutil.Int())
 	prepare := fmt.Sprintf("%s-prepare", n)
 
 	m, err := sn.Prepare(ctx, prepare, parent, opt)

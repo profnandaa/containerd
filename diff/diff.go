@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -125,8 +125,11 @@ func WithPayloads(payloads map[string]typeurl.Any) ApplyOpt {
 	}
 }
 
-// WithSourceDateEpoch specifies the timestamp used for whiteouts to provide control for reproducibility.
+// WithSourceDateEpoch specifies the timestamp used to provide control for reproducibility.
 // See also https://reproducible-builds.org/docs/source-date-epoch/ .
+//
+// Since containerd v2.0, the whiteout timestamps are set to zero (1970-01-01),
+// not to the source date epoch.
 func WithSourceDateEpoch(tm *time.Time) Opt {
 	return func(c *Config) error {
 		c.SourceDateEpoch = tm

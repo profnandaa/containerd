@@ -25,29 +25,29 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
+	"github.com/containerd/containerd/pkg/cri/instrument"
+	"github.com/containerd/containerd/pkg/cri/nri"
+	"github.com/containerd/containerd/pkg/cri/sbserver/images"
 	"github.com/containerd/containerd/pkg/cri/sbserver/podsandbox"
+	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
+	snapshotstore "github.com/containerd/containerd/pkg/cri/store/snapshot"
 	"github.com/containerd/containerd/pkg/cri/streaming"
-	"github.com/containerd/containerd/pkg/kmutex"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/sandbox"
-	runtime_alpha "github.com/containerd/containerd/third_party/k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	"github.com/containerd/go-cni"
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/containerd/pkg/cri/store/label"
 
-	"github.com/containerd/containerd/pkg/atomic"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
-	snapshotstore "github.com/containerd/containerd/pkg/cri/store/snapshot"
 	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 	osinterface "github.com/containerd/containerd/pkg/os"
 	"github.com/containerd/containerd/pkg/registrar"
@@ -56,28 +56,35 @@ import (
 // defaultNetworkPlugin is used for the default CNI configuration
 const defaultNetworkPlugin = "default"
 
-// grpcServices are all the grpc services provided by cri containerd.
-type grpcServices interface {
-	runtime.RuntimeServiceServer
-	runtime.ImageServiceServer
-}
-
-type grpcAlphaServices interface {
-	runtime_alpha.RuntimeServiceServer
-	runtime_alpha.ImageServiceServer
-}
-
 // CRIService is the interface implement CRI remote service server.
 type CRIService interface {
-	Run() error
-	// io.Closer is used by containerd to gracefully stop cri service.
+	runtime.RuntimeServiceServer
+	runtime.ImageServiceServer
+	// Closer is used by containerd to gracefully stop cri service.
 	io.Closer
+
+	Run(ready func()) error
+
 	Register(*grpc.Server) error
-	grpcServices
+}
+
+// imageService specifies dependencies to image service.
+type imageService interface {
+	runtime.ImageServiceServer
+
+	RuntimeSnapshotter(ctx context.Context, ociRuntime criconfig.Runtime) string
+
+	UpdateImage(ctx context.Context, r string) error
+
+	GetImage(id string) (imagestore.Image, error)
+	GetSnapshot(key string) (snapshotstore.Snapshot, error)
+
+	LocalResolve(refOrID string) (imagestore.Image, error)
 }
 
 // criService implements CRIService.
 type criService struct {
+	imageService
 	// config contains all configurations.
 	config criconfig.Config
 	// imageFSPath is the path to image filesystem.
@@ -97,10 +104,6 @@ type criService struct {
 	// containerNameIndex stores all container names and make sure each
 	// name is unique.
 	containerNameIndex *registrar.Registrar
-	// imageStore stores all resources associated with images.
-	imageStore *imagestore.Store
-	// snapshotStore stores information of all snapshots.
-	snapshotStore *snapshotstore.Store
 	// netPlugin is used to setup and teardown network when run/stop pod sandbox.
 	netPlugin map[string]cni.CNI
 	// client is an instance of the containerd client
@@ -120,44 +123,47 @@ type criService struct {
 	// allCaps is the list of the capabilities.
 	// When nil, parsed from CapEff of /proc/self/status.
 	allCaps []string //nolint:nolintlint,unused // Ignore on non-Linux
-	// unpackDuplicationSuppressor is used to make sure that there is only
-	// one in-flight fetch request or unpack handler for a given descriptor's
-	// or chain ID.
-	unpackDuplicationSuppressor kmutex.KeyedLocker
 	// containerEventsChan is used to capture container events and send them
 	// to the caller of GetContainerEvents.
 	containerEventsChan chan runtime.ContainerEventResponse
+	// nri is used to hook NRI into CRI request processing.
+	nri *nri.API
 }
 
 // NewCRIService returns a new instance of CRIService
-func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIService, error) {
+func NewCRIService(config criconfig.Config, client *containerd.Client, nri *nri.API) (CRIService, error) {
 	var err error
 	labels := label.NewStore()
+
+	if client.SnapshotService(config.ContainerdConfig.Snapshotter) == nil {
+		return nil, fmt.Errorf("failed to find snapshotter %q", config.ContainerdConfig.Snapshotter)
+	}
+
+	imageFSPath := imageFSPath(config.ContainerdRootDir, config.ContainerdConfig.Snapshotter)
+	log.L.Infof("Get image filesystem path %q", imageFSPath)
+
+	// TODO: expose this as a separate containerd plugin.
+	imageService, err := images.NewService(config, imageFSPath, client)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create CRI image service: %w", err)
+	}
+
 	c := &criService{
-		config:                      config,
-		client:                      client,
-		os:                          osinterface.RealOS{},
-		sandboxStore:                sandboxstore.NewStore(labels),
-		containerStore:              containerstore.NewStore(labels),
-		imageStore:                  imagestore.NewStore(client),
-		snapshotStore:               snapshotstore.NewStore(),
-		sandboxNameIndex:            registrar.NewRegistrar(),
-		containerNameIndex:          registrar.NewRegistrar(),
-		initialized:                 atomic.NewBool(false),
-		netPlugin:                   make(map[string]cni.CNI),
-		unpackDuplicationSuppressor: kmutex.New(),
-		sandboxControllers:          make(map[criconfig.SandboxControllerMode]sandbox.Controller),
+		imageService:       imageService,
+		config:             config,
+		client:             client,
+		imageFSPath:        imageFSPath,
+		os:                 osinterface.RealOS{},
+		sandboxStore:       sandboxstore.NewStore(labels),
+		containerStore:     containerstore.NewStore(labels),
+		sandboxNameIndex:   registrar.NewRegistrar(),
+		containerNameIndex: registrar.NewRegistrar(),
+		netPlugin:          make(map[string]cni.CNI),
+		sandboxControllers: make(map[criconfig.SandboxControllerMode]sandbox.Controller),
 	}
 
 	// TODO: figure out a proper channel size.
 	c.containerEventsChan = make(chan runtime.ContainerEventResponse, 1000)
-
-	if client.SnapshotService(c.config.ContainerdConfig.Snapshotter) == nil {
-		return nil, fmt.Errorf("failed to find snapshotter %q", c.config.ContainerdConfig.Snapshotter)
-	}
-
-	c.imageFSPath = imageFSPath(config.ContainerdRootDir, config.ContainerdConfig.Snapshotter)
-	logrus.Infof("Get image filesystem path %q", c.imageFSPath)
 
 	if err := c.initPlatform(); err != nil {
 		return nil, fmt.Errorf("initialize platform: %w", err)
@@ -195,8 +201,10 @@ func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIServi
 	}
 
 	// Load all sandbox controllers(pod sandbox controller and remote shim controller)
-	c.sandboxControllers[criconfig.ModePodSandbox] = podsandbox.New(config, client, c.sandboxStore, c.os, c, c.baseOCISpecs)
+	c.sandboxControllers[criconfig.ModePodSandbox] = podsandbox.New(config, client, c.sandboxStore, c.os, c, imageService, c.baseOCISpecs)
 	c.sandboxControllers[criconfig.ModeShim] = client.SandboxController()
+
+	c.nri = nri
 
 	return c, nil
 }
@@ -205,12 +213,6 @@ func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIServi
 // TODO: get rid of this.
 func (c *criService) BackOffEvent(id string, event interface{}) {
 	c.eventMonitor.backOff.enBackOff(id, event)
-}
-
-// GenerateAndSendContainerEvent is a temporary workaround to send PLEG events from podsandbopx/ controller
-// TODO: refactor PLEG event generator so both podsandbox/ controller and CRI service can access it.
-func (c *criService) GenerateAndSendContainerEvent(ctx context.Context, containerID string, sandboxID string, eventType runtime.ContainerEventType) {
-	c.generateAndSendContainerEvent(ctx, containerID, sandboxID, eventType)
 }
 
 // Register registers all required services onto a specific grpc server.
@@ -229,57 +231,61 @@ func (c *criService) RegisterTCP(s *grpc.Server) error {
 }
 
 // Run starts the CRI service.
-func (c *criService) Run() error {
-	logrus.Info("Start subscribing containerd event")
+func (c *criService) Run(ready func()) error {
+	log.L.Info("Start subscribing containerd event")
 	c.eventMonitor.subscribe(c.client)
 
-	logrus.Infof("Start recovering state")
+	log.L.Infof("Start recovering state")
 	if err := c.recover(ctrdutil.NamespacedContext()); err != nil {
 		return fmt.Errorf("failed to recover state: %w", err)
 	}
 
 	// Start event handler.
-	logrus.Info("Start event monitor")
+	log.L.Info("Start event monitor")
 	eventMonitorErrCh := c.eventMonitor.start()
-
-	// Start snapshot stats syncer, it doesn't need to be stopped.
-	logrus.Info("Start snapshots syncer")
-	snapshotsSyncer := newSnapshotsSyncer(
-		c.snapshotStore,
-		c.client.SnapshotService(c.config.ContainerdConfig.Snapshotter),
-		time.Duration(c.config.StatsCollectPeriod)*time.Second,
-	)
-	snapshotsSyncer.start()
 
 	// Start CNI network conf syncers
 	cniNetConfMonitorErrCh := make(chan error, len(c.cniNetConfMonitor))
 	var netSyncGroup sync.WaitGroup
 	for name, h := range c.cniNetConfMonitor {
 		netSyncGroup.Add(1)
-		logrus.Infof("Start cni network conf syncer for %s", name)
+		log.L.Infof("Start cni network conf syncer for %s", name)
 		go func(h *cniNetConfSyncer) {
 			cniNetConfMonitorErrCh <- h.syncLoop()
 			netSyncGroup.Done()
 		}(h)
 	}
-	go func() {
-		netSyncGroup.Wait()
-		close(cniNetConfMonitorErrCh)
-	}()
+	// For platforms that may not support CNI (darwin etc.) there's no
+	// use in launching this as `Wait` will return immediately. Further
+	// down we select on this channel along with some others to determine
+	// if we should Close() the CRI service, so closing this preemptively
+	// isn't good.
+	if len(c.cniNetConfMonitor) > 0 {
+		go func() {
+			netSyncGroup.Wait()
+			close(cniNetConfMonitorErrCh)
+		}()
+	}
 
 	// Start streaming server.
-	logrus.Info("Start streaming server")
+	log.L.Info("Start streaming server")
 	streamServerErrCh := make(chan error)
 	go func() {
 		defer close(streamServerErrCh)
 		if err := c.streamServer.Start(true); err != nil && err != http.ErrServerClosed {
-			logrus.WithError(err).Error("Failed to start streaming server")
+			log.L.WithError(err).Error("Failed to start streaming server")
 			streamServerErrCh <- err
 		}
 	}()
 
+	// register CRI domain with NRI
+	if err := c.nri.Register(&criImplementation{c}); err != nil {
+		return fmt.Errorf("failed to set up NRI for CRI service: %w", err)
+	}
+
 	// Set the server as initialized. GRPC services could start serving traffic.
-	c.initialized.Set()
+	c.initialized.Store(true)
+	ready()
 
 	var eventMonitorErr, streamServerErr, cniNetConfMonitorErr error
 	// Stop the whole CRI service if any of the critical service exits.
@@ -296,11 +302,11 @@ func (c *criService) Run() error {
 	if err := <-eventMonitorErrCh; err != nil {
 		eventMonitorErr = err
 	}
-	logrus.Info("Event monitor stopped")
+	log.L.Info("Event monitor stopped")
 	if err := <-streamServerErrCh; err != nil {
 		streamServerErr = err
 	}
-	logrus.Info("Stream server stopped")
+	log.L.Info("Stream server stopped")
 	if eventMonitorErr != nil {
 		return fmt.Errorf("event monitor error: %w", eventMonitorErr)
 	}
@@ -316,10 +322,10 @@ func (c *criService) Run() error {
 // Close stops the CRI service.
 // TODO(random-liu): Make close synchronous.
 func (c *criService) Close() error {
-	logrus.Info("Stop CRI service")
+	log.L.Info("Stop CRI service")
 	for name, h := range c.cniNetConfMonitor {
 		if err := h.stop(); err != nil {
-			logrus.WithError(err).Errorf("failed to stop cni network conf monitor for %s", name)
+			log.L.WithError(err).Errorf("failed to stop cni network conf monitor for %s", name)
 		}
 	}
 	c.eventMonitor.stop()
@@ -329,20 +335,22 @@ func (c *criService) Close() error {
 	return nil
 }
 
+// IsInitialized indicates whether CRI service has finished initialization.
+func (c *criService) IsInitialized() bool {
+	return c.initialized.Load()
+}
+
 func (c *criService) register(s *grpc.Server) error {
-	instrumented := newInstrumentedService(c)
+	instrumented := instrument.NewService(c)
 	runtime.RegisterRuntimeServiceServer(s, instrumented)
 	runtime.RegisterImageServiceServer(s, instrumented)
-	instrumentedAlpha := newInstrumentedAlphaService(c)
-	runtime_alpha.RegisterRuntimeServiceServer(s, instrumentedAlpha)
-	runtime_alpha.RegisterImageServiceServer(s, instrumentedAlpha)
 	return nil
 }
 
 // imageFSPath returns containerd image filesystem path.
 // Note that if containerd changes directory layout, we also needs to change this.
 func imageFSPath(rootDir, snapshotter string) string {
-	return filepath.Join(rootDir, fmt.Sprintf("%s.%s", plugin.SnapshotPlugin, snapshotter))
+	return filepath.Join(rootDir, plugin.SnapshotPlugin.String()+"."+snapshotter)
 }
 
 func loadOCISpec(filename string) (*oci.Spec, error) {

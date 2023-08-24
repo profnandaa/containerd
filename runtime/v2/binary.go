@@ -24,10 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	gruntime "runtime"
-	"strings"
-
-	"github.com/containerd/ttrpc"
-	"github.com/sirupsen/logrus"
 
 	"github.com/containerd/containerd/api/runtime/task/v2"
 	"github.com/containerd/containerd/log"
@@ -66,8 +62,8 @@ type binary struct {
 
 func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ *shim, err error) {
 	args := []string{"-id", b.bundle.ID}
-	switch logrus.GetLevel() {
-	case logrus.DebugLevel, logrus.TraceLevel:
+	switch log.GetLevel() {
+	case log.DebugLevel, log.TraceLevel:
 		args = append(args, "-debug")
 	}
 	args = append(args, "start")
@@ -121,11 +117,8 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", out, err)
 	}
-	address := strings.TrimSpace(string(out))
-	conn, err := client.Connect(address, client.AnonDialer)
-	if err != nil {
-		return nil, err
-	}
+	response := bytes.TrimSpace(out)
+
 	onCloseWithShimLog := func() {
 		onClose()
 		cancelShimLog()
@@ -135,10 +128,20 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 	if err := os.WriteFile(filepath.Join(b.bundle.Path, "shim-binary-path"), []byte(b.runtime), 0600); err != nil {
 		return nil, err
 	}
-	client := ttrpc.NewClient(conn, ttrpc.WithOnClose(onCloseWithShimLog))
+
+	params, err := parseStartResponse(ctx, response)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := makeConnection(ctx, params, onCloseWithShimLog)
+	if err != nil {
+		return nil, err
+	}
+
 	return &shim{
 		bundle: b.bundle,
-		client: client,
+		client: conn,
 	}, nil
 }
 
@@ -158,8 +161,8 @@ func (b *binary) Delete(ctx context.Context) (*runtime.Exit, error) {
 		"-id", b.bundle.ID,
 		"-bundle", b.bundle.Path,
 	}
-	switch logrus.GetLevel() {
-	case logrus.DebugLevel, logrus.TraceLevel:
+	switch log.GetLevel() {
+	case log.DebugLevel, log.TraceLevel:
 		args = append(args, "-debug")
 	}
 	args = append(args, "delete")

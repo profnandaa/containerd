@@ -48,7 +48,7 @@ Update the containerd config file, which by default is at
 `/etc/containerd/config.toml`. Add a `[proxy_plugins]` section along with a
 section for your given plugin `[proxy_plugins.myplugin]`. The `address` must
 refer to a local socket file which the containerd process has access to. The
-currently supported types are `snapshot` and `content`.
+currently supported types are `snapshot`, `content`, and `diff`.
 
 ```toml
 version = 2
@@ -63,8 +63,7 @@ version = 2
 
 Implementing a proxy plugin is as easy as implementing the gRPC API for a
 service. For implementing a proxy plugin in Go, look at the go doc for
-[content store service](https://godoc.org/github.com/containerd/containerd/api/services/content/v1#ContentServer)
-and [snapshotter service](https://godoc.org/github.com/containerd/containerd/api/services/snapshots/v1#SnapshotsServer).
+[content store service](https://godoc.org/github.com/containerd/containerd/api/services/content/v1#ContentServer), [snapshotter service](https://godoc.org/github.com/containerd/containerd/api/services/snapshots/v1#SnapshotsServer), and [diff service](https://pkg.go.dev/github.com/containerd/containerd/api/services/diff/v1#DiffServer).
 
 The following example creates a snapshot plugin binary which can be used
 with any implementation of
@@ -253,7 +252,7 @@ If you want to get the configuration combined with your configuration, run `cont
 
 containerd has two configuration versions:
 - Version 2 (Recommended): Introduced in containerd 1.3.
-- Version 1 (Default): Introduced in containerd 1.0. Deprecated and will be removed in containerd 2.0.
+- Version 1 (Default): Introduced in containerd 1.0. Removed in containerd 2.0.
 
 A configuration with Version 2 must have `version = 2` header, and must have
 fully qualified plugin IDs in the `[plugins]` section:

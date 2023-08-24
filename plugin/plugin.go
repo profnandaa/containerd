@@ -78,7 +78,7 @@ const (
 	EventPlugin Type = "io.containerd.event.v1"
 	// LeasePlugin implements lease manager
 	LeasePlugin Type = "io.containerd.lease.v1"
-	// Streaming implements a stream manager
+	// StreamingPlugin implements a stream manager
 	StreamingPlugin Type = "io.containerd.streaming.v1"
 	// TracingProcessorPlugin implements a open telemetry span processor
 	TracingProcessorPlugin Type = "io.containerd.tracing.processor.v1"
@@ -88,13 +88,11 @@ const (
 	TransferPlugin Type = "io.containerd.transfer.v1"
 	// SandboxStorePlugin implements a sandbox store
 	SandboxStorePlugin Type = "io.containerd.sandbox.store.v1"
+	// SandboxControllerPlugin implements a sandbox controller
+	SandboxControllerPlugin Type = "io.containerd.sandbox.controller.v1"
 )
 
 const (
-	// RuntimeLinuxV1 is the legacy linux runtime
-	RuntimeLinuxV1 = "io.containerd.runtime.v1.linux"
-	// RuntimeRuncV1 is the runc runtime that supports a single container
-	RuntimeRuncV1 = "io.containerd.runc.v1"
 	// RuntimeRuncV2 is the runc runtime that supports multiple containers per shim
 	RuntimeRuncV2 = "io.containerd.runc.v2"
 )
@@ -132,7 +130,7 @@ func (r *Registration) Init(ic *InitContext) *Plugin {
 
 // URI returns the full plugin URI
 func (r *Registration) URI() string {
-	return fmt.Sprintf("%s.%s", r.Type, r.ID)
+	return r.Type.String() + "." + r.ID
 }
 
 var register = struct {
@@ -140,7 +138,11 @@ var register = struct {
 	r []*Registration
 }{}
 
-// Load loads all plugins at the provided path into containerd
+// Load loads all plugins at the provided path into containerd.
+//
+// Load is currently only implemented on non-static, non-gccgo builds for amd64
+// and arm64, and plugins must be built with the exact same version of Go as
+// containerd itself.
 func Load(path string) (err error) {
 	defer func() {
 		if v := recover(); v != nil {

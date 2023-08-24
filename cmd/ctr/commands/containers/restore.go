@@ -25,22 +25,22 @@ import (
 	"github.com/containerd/containerd/cmd/ctr/commands"
 	"github.com/containerd/containerd/cmd/ctr/commands/tasks"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/sirupsen/logrus"
+	"github.com/containerd/containerd/log"
 	"github.com/urfave/cli"
 )
 
 var restoreCommand = cli.Command{
 	Name:      "restore",
-	Usage:     "restore a container from checkpoint",
+	Usage:     "Restore a container from checkpoint",
 	ArgsUsage: "CONTAINER REF",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "rw",
-			Usage: "restore the rw layer from the checkpoint",
+			Usage: "Restore the rw layer from the checkpoint",
 		},
 		cli.BoolFlag{
 			Name:  "live",
-			Usage: "restore the runtime and memory data from the checkpoint",
+			Usage: "Restore the runtime and memory data from the checkpoint",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -124,7 +124,7 @@ var restoreCommand = cli.Command{
 		}
 
 		if err := tasks.HandleConsoleResize(ctx, task, con); err != nil {
-			logrus.WithError(err).Error("console resize")
+			log.G(ctx).WithError(err).Error("console resize")
 		}
 
 		status := <-statusC

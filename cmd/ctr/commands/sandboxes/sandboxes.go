@@ -34,7 +34,7 @@ import (
 var Command = cli.Command{
 	Name:    "sandboxes",
 	Aliases: []string{"sandbox", "sb", "s"},
-	Usage:   "manage sandboxes",
+	Usage:   "Manage sandboxes",
 	Subcommands: cli.Commands{
 		runCommand,
 		listCommand,
@@ -45,12 +45,12 @@ var Command = cli.Command{
 var runCommand = cli.Command{
 	Name:      "run",
 	Aliases:   []string{"create", "c", "r"},
-	Usage:     "run a new sandbox",
+	Usage:     "Run a new sandbox",
 	ArgsUsage: "[flags] <pod-config.json> <sandbox-id>",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "runtime",
-			Usage: "runtime name",
+			Usage: "Runtime name",
 			Value: defaults.DefaultRuntime,
 		},
 	},
@@ -65,12 +65,12 @@ var runCommand = cli.Command{
 
 		spec, err := os.ReadFile(context.Args().First())
 		if err != nil {
-			return fmt.Errorf("Failed to read sandbox config: %w", err)
+			return fmt.Errorf("failed to read sandbox config: %w", err)
 		}
 
 		ociSpec := oci.Spec{}
 		if err = json.Unmarshal(spec, &ociSpec); err != nil {
-			return fmt.Errorf("Failed to parse sandbox config: %w", err)
+			return fmt.Errorf("failed to parse sandbox config: %w", err)
 		}
 
 		client, ctx, cancel, err := commands.NewClient(context)
@@ -100,11 +100,11 @@ var runCommand = cli.Command{
 var listCommand = cli.Command{
 	Name:    "list",
 	Aliases: []string{"ls"},
-	Usage:   "list sandboxes",
+	Usage:   "List sandboxes",
 	Flags: []cli.Flag{
 		cli.StringSliceFlag{
 			Name:  "filters",
-			Usage: "the list of filters to apply when querying sandboxes from the store",
+			Usage: "The list of filters to apply when querying sandboxes from the store",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -147,11 +147,11 @@ var removeCommand = cli.Command{
 	Name:      "remove",
 	Aliases:   []string{"rm"},
 	ArgsUsage: "<id> [<id>, ...]",
-	Usage:     "remove sandboxes",
+	Usage:     "Remove sandboxes",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "force, f",
-			Usage: "ignore shutdown errors when removing sandbox",
+			Usage: "Ignore shutdown errors when removing sandbox",
 		},
 	},
 	Action: func(context *cli.Context) error {

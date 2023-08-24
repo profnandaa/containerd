@@ -24,7 +24,6 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 
-	"github.com/sirupsen/logrus"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
@@ -49,7 +48,7 @@ func (c *criService) RemovePodSandbox(ctx context.Context, r *runtime.RemovePodS
 	// If the sandbox is still running, not ready, or in an unknown state, forcibly stop it.
 	// Even if it's in a NotReady state, this will close its network namespace, if open.
 	// This can happen if the task process associated with the Pod died or it was killed.
-	logrus.Infof("Forcibly stopping sandbox %q", id)
+	log.G(ctx).Infof("Forcibly stopping sandbox %q", id)
 	if err := c.stopPodSandbox(ctx, sandbox); err != nil {
 		return nil, fmt.Errorf("failed to forcibly stop sandbox %q: %w", id, err)
 	}
@@ -86,8 +85,16 @@ func (c *criService) RemovePodSandbox(ctx context.Context, r *runtime.RemovePodS
 		return nil, fmt.Errorf("failed to get sandbox controller: %w", err)
 	}
 
-	if _, err := controller.Shutdown(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+	if err := controller.Shutdown(ctx, id); err != nil && !errdefs.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to delete sandbox %q: %w", id, err)
+	}
+
+	// Send CONTAINER_DELETED event with ContainerId equal to SandboxId.
+	c.generateAndSendContainerEvent(ctx, id, id, runtime.ContainerEventType_CONTAINER_DELETED_EVENT)
+
+	err = c.nri.RemovePodSandbox(ctx, &sandbox)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("NRI pod removal notification failed")
 	}
 
 	// Remove sandbox from sandbox store. Note that once the sandbox is successfully

@@ -26,45 +26,45 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/cmd/ctr/commands"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
 var execCommand = cli.Command{
 	Name:           "exec",
-	Usage:          "execute additional processes in an existing container",
+	Usage:          "Execute additional processes in an existing container",
 	ArgsUsage:      "[flags] CONTAINER CMD [ARG...]",
 	SkipArgReorder: true,
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "cwd",
-			Usage: "working directory of the new process",
+			Usage: "Working directory of the new process",
 		},
 		cli.BoolFlag{
 			Name:  "tty,t",
-			Usage: "allocate a TTY for the container",
+			Usage: "Allocate a TTY for the container",
 		},
 		cli.BoolFlag{
 			Name:  "detach,d",
-			Usage: "detach from the task after it has started execution",
+			Usage: "Detach from the task after it has started execution",
 		},
 		cli.StringFlag{
 			Name:     "exec-id",
 			Required: true,
-			Usage:    "exec specific id for the process",
+			Usage:    "Exec specific id for the process",
 		},
 		cli.StringFlag{
 			Name:  "fifo-dir",
-			Usage: "directory used for storing IO FIFOs",
+			Usage: "Directory used for storing IO FIFOs",
 		},
 		cli.StringFlag{
 			Name:  "log-uri",
-			Usage: "log uri for custom shim logging",
+			Usage: "Log uri for custom shim logging",
 		},
 		cli.StringFlag{
 			Name:  "user",
-			Usage: "user id or name",
+			Usage: "User id or name",
 		},
 	},
 	Action: func(context *cli.Context) error {
@@ -174,7 +174,7 @@ var execCommand = cli.Command{
 		}
 		if tty {
 			if err := HandleConsoleResize(ctx, process, con); err != nil {
-				logrus.WithError(err).Error("console resize")
+				log.L.WithError(err).Error("console resize")
 			}
 		} else {
 			sigc := commands.ForwardAllSignals(ctx, process)

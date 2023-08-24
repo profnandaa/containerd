@@ -44,6 +44,8 @@ const upperdirKey = "containerd.io/snapshot/overlay.upperdir"
 type SnapshotterConfig struct {
 	asyncRemove   bool
 	upperdirLabel bool
+	ms            MetaStore
+	mountOptions  []string
 }
 
 // Opt is an option to configure the overlay snapshotter
@@ -67,13 +69,36 @@ func WithUpperdirLabel(config *SnapshotterConfig) error {
 	return nil
 }
 
+// WithMountOptions defines the default mount options used for the overlay mount.
+// NOTE: Options are not applied to bind mounts.
+func WithMountOptions(options []string) Opt {
+	return func(config *SnapshotterConfig) error {
+		config.mountOptions = append(config.mountOptions, options...)
+		return nil
+	}
+}
+
+type MetaStore interface {
+	TransactionContext(ctx context.Context, writable bool) (context.Context, storage.Transactor, error)
+	WithTransaction(ctx context.Context, writable bool, fn storage.TransactionCallback) error
+	Close() error
+}
+
+// WithMetaStore allows the MetaStore to be created outside the snapshotter
+// and passed in.
+func WithMetaStore(ms MetaStore) Opt {
+	return func(config *SnapshotterConfig) error {
+		config.ms = ms
+		return nil
+	}
+}
+
 type snapshotter struct {
 	root          string
-	ms            *storage.MetaStore
+	ms            MetaStore
 	asyncRemove   bool
 	upperdirLabel bool
-	indexOff      bool
-	userxattr     bool // whether to enable "userxattr" mount option
+	options       []string
 }
 
 // NewSnapshotter returns a Snapshotter which uses overlayfs. The overlayfs
@@ -97,28 +122,52 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	if !supportsDType {
 		return nil, fmt.Errorf("%s does not support d_type. If the backing filesystem is xfs, please reformat with ftype=1 to enable d_type support", root)
 	}
-	ms, err := storage.NewMetaStore(filepath.Join(root, "metadata.db"))
-	if err != nil {
-		return nil, err
+	if config.ms == nil {
+		config.ms, err = storage.NewMetaStore(filepath.Join(root, "metadata.db"))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
-	// figure out whether "userxattr" option is recognized by the kernel && needed
-	userxattr, err := overlayutils.NeedsUserXAttr(root)
-	if err != nil {
-		logrus.WithError(err).Warnf("cannot detect whether \"userxattr\" option needs to be used, assuming to be %v", userxattr)
+
+	if !hasOption(config.mountOptions, "userxattr", false) {
+		// figure out whether "userxattr" option is recognized by the kernel && needed
+		userxattr, err := overlayutils.NeedsUserXAttr(root)
+		if err != nil {
+			logrus.WithError(err).Warnf("cannot detect whether \"userxattr\" option needs to be used, assuming to be %v", userxattr)
+		}
+		if userxattr {
+			config.mountOptions = append(config.mountOptions, "userxattr")
+		}
+	}
+
+	if !hasOption(config.mountOptions, "index", false) && supportsIndex() {
+		config.mountOptions = append(config.mountOptions, "index=off")
 	}
 
 	return &snapshotter{
 		root:          root,
-		ms:            ms,
+		ms:            config.ms,
 		asyncRemove:   config.asyncRemove,
 		upperdirLabel: config.upperdirLabel,
-		indexOff:      supportsIndex(),
-		userxattr:     userxattr,
+		options:       config.mountOptions,
 	}, nil
+}
+
+func hasOption(options []string, key string, hasValue bool) bool {
+	for _, option := range options {
+		if hasValue {
+			if strings.HasPrefix(option, key) && len(option) > len(key) && option[len(key)] == '=' {
+				return true
+			}
+		} else if option == key {
+			return true
+		}
+	}
+	return false
 }
 
 // Stat returns the info for an active or committed snapshot by name or
@@ -453,17 +502,8 @@ func (o *snapshotter) mounts(s storage.Snapshot) []mount.Mount {
 			},
 		}
 	}
-	var options []string
 
-	// set index=off when mount overlayfs
-	if o.indexOff {
-		options = append(options, "index=off")
-	}
-
-	if o.userxattr {
-		options = append(options, "userxattr")
-	}
-
+	options := o.options
 	if s.Kind == snapshots.KindActive {
 		options = append(options,
 			fmt.Sprintf("workdir=%s", o.workPath(s.ID)),

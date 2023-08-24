@@ -87,6 +87,7 @@ func (j *ProgressTracker) HandleProgress(ctx context.Context, pf transfer.Progre
 	// Instead of ticker, just delay
 	jobs := map[digest.Digest]*jobStatus{}
 	tc := time.NewTicker(time.Millisecond * 300)
+	defer tc.Stop()
 
 	update := func() {
 		// TODO: Filter by references
@@ -208,7 +209,7 @@ func (j *ProgressTracker) MarkExists(desc ocispec.Descriptor) {
 
 }
 
-// Adds hierarchy information
+// AddChildren adds hierarchy information
 func (j *ProgressTracker) AddChildren(desc ocispec.Descriptor, children []ocispec.Descriptor) {
 	if j == nil || len(children) == 0 {
 		return

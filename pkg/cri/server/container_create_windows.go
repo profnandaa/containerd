@@ -18,7 +18,6 @@ package server
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -51,9 +50,8 @@ func (c *criService) containerSpec(
 	extraMounts []*runtime.Mount,
 	ociRuntime config.Runtime,
 ) (*runtimespec.Spec, error) {
-	specOpts := []oci.SpecOpts{
-		customopts.WithProcessArgs(config, imageConfig),
-	}
+	var specOpts []oci.SpecOpts
+	specOpts = append(specOpts, customopts.WithProcessCommandLineOrArgsForWindows(config, imageConfig))
 
 	// All containers in a pod need to have HostProcess set if it was set on the pod,
 	// and vice versa no containers in the pod can be HostProcess if the pods spec
@@ -127,16 +125,11 @@ func (c *criService) containerSpec(
 		specOpts = append(specOpts, customopts.WithAnnotation(pKey, pValue))
 	}
 
+	specOpts = append(specOpts, customopts.WithAnnotation(annotations.WindowsHostProcess, strconv.FormatBool(sandboxHpc)))
 	specOpts = append(specOpts,
-		customopts.WithAnnotation(annotations.ContainerType, annotations.ContainerTypeContainer),
-		customopts.WithAnnotation(annotations.SandboxID, sandboxID),
-		customopts.WithAnnotation(annotations.SandboxNamespace, sandboxConfig.GetMetadata().GetNamespace()),
-		customopts.WithAnnotation(annotations.SandboxUID, sandboxConfig.GetMetadata().GetUid()),
-		customopts.WithAnnotation(annotations.SandboxName, sandboxConfig.GetMetadata().GetName()),
-		customopts.WithAnnotation(annotations.ContainerName, containerName),
-		customopts.WithAnnotation(annotations.ImageName, imageName),
-		customopts.WithAnnotation(annotations.WindowsHostProcess, strconv.FormatBool(sandboxHpc)),
+		annotations.DefaultCRIAnnotations(sandboxID, containerName, imageName, sandboxConfig, false)...,
 	)
+
 	return c.runtimeSpec(id, ociRuntime.BaseRuntimeSpec, specOpts...)
 }
 
@@ -153,9 +146,8 @@ func snapshotterOpts(snapshotterName string, config *runtime.ContainerConfig) ([
 	case "windows":
 		rootfsSize := config.GetWindows().GetResources().GetRootfsSizeInBytes()
 		if rootfsSize != 0 {
-			sizeStr := fmt.Sprintf("%d", rootfsSize)
 			labels := map[string]string{
-				"containerd.io/snapshot/windows/rootfs.sizebytes": sizeStr,
+				"containerd.io/snapshot/windows/rootfs.sizebytes": strconv.FormatInt(rootfsSize, 10),
 			}
 			opts = append(opts, snapshots.WithLabels(labels))
 		}

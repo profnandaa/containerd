@@ -30,10 +30,10 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/integration/remote"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/plugin"
 	metrics "github.com/docker/go-metrics"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -126,61 +126,65 @@ func main() {
 	app.Flags = []cli.Flag{
 		cli.BoolFlag{
 			Name:  "debug",
-			Usage: "set debug output in the logs",
+			Usage: "Set debug output in the logs",
 		},
 		cli.StringFlag{
 			Name:  "address,a",
 			Value: "/run/containerd/containerd.sock",
-			Usage: "path to the containerd socket",
+			Usage: "Path to the containerd socket",
 		},
 		cli.IntFlag{
 			Name:  "concurrent,c",
 			Value: 1,
-			Usage: "set the concurrency of the stress test",
+			Usage: "Set the concurrency of the stress test",
 		},
 		cli.BoolFlag{
 			Name:  "cri",
-			Usage: "utilize CRI to create pods for the stress test. This requires a runtime that matches CRI runtime handler. Example: --runtime runc",
+			Usage: "Utilize CRI to create pods for the stress test. This requires a runtime that matches CRI runtime handler. Example: --runtime runc",
 		},
 		cli.DurationFlag{
 			Name:  "duration,d",
 			Value: 1 * time.Minute,
-			Usage: "set the duration of the stress test",
+			Usage: "Set the duration of the stress test",
 		},
 		cli.BoolFlag{
 			Name:  "exec",
-			Usage: "add execs to the stress tests (non-CRI only)",
+			Usage: "Add execs to the stress tests (non-CRI only)",
 		},
 		cli.StringFlag{
 			Name:  "image,i",
 			Value: "docker.io/library/alpine:latest",
-			Usage: "image to be utilized for testing",
+			Usage: "Image to be utilized for testing",
 		},
 		cli.BoolFlag{
 			Name:  "json,j",
-			Usage: "output results in json format",
+			Usage: "Output results in json format",
 		},
 		cli.StringFlag{
 			Name:  "metrics,m",
-			Usage: "address to serve the metrics API",
+			Usage: "Address to serve the metrics API",
 		},
 		cli.StringFlag{
 			Name:  "runtime",
-			Usage: "set the runtime to stress test",
+			Usage: "Set the runtime to stress test",
 			Value: plugin.RuntimeRuncV2,
 		},
 		cli.StringFlag{
 			Name:  "snapshotter",
-			Usage: "set the snapshotter to use",
+			Usage: "Set the snapshotter to use",
 			Value: "overlayfs",
 		},
 	}
 	app.Before = func(context *cli.Context) error {
 		if context.GlobalBool("json") {
-			logrus.SetLevel(logrus.WarnLevel)
+			if err := log.SetLevel("warn"); err != nil {
+				return err
+			}
 		}
 		if context.GlobalBool("debug") {
-			logrus.SetLevel(logrus.DebugLevel)
+			if err := log.SetLevel("debug"); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -241,7 +245,7 @@ func serve(c config) error {
 			ReadHeaderTimeout: 5 * time.Minute, // "G112: Potential Slowloris Attack (gosec)"; not a real concern for our use, so setting a long timeout.
 		}
 		if err := srv.ListenAndServe(); err != nil {
-			logrus.WithError(err).Error("listen and serve")
+			log.L.WithError(err).Error("listen and serve")
 		}
 	}()
 	checkBinarySizes()
@@ -287,7 +291,7 @@ func criTest(c config) error {
 		workers []worker
 		r       = &run{}
 	)
-	logrus.Info("starting stress test run...")
+	log.L.Info("starting stress test run...")
 	// create the workers along with their spec
 	for i := 0; i < c.Concurrency; i++ {
 		wg.Add(1)
@@ -312,9 +316,9 @@ func criTest(c config) error {
 	r.end()
 
 	results := r.gather(workers)
-	logrus.Infof("ending test run in %0.3f seconds", results.Seconds)
+	log.L.Infof("ending test run in %0.3f seconds", results.Seconds)
 
-	logrus.WithField("failures", r.failures).Infof(
+	log.L.WithField("failures", r.failures).Infof(
 		"create/start/delete %d containers in %0.3f seconds (%0.3f c/sec) or (%0.3f sec/c)",
 		results.Total,
 		results.Seconds,
@@ -345,7 +349,7 @@ func test(c config) error {
 		return err
 	}
 
-	logrus.Infof("pulling %s", c.Image)
+	log.L.Infof("pulling %s", c.Image)
 	image, err := client.Pull(ctx, c.Image, containerd.WithPullUnpack, containerd.WithPullSnapshotter(c.Snapshotter))
 	if err != nil {
 		return err
@@ -367,7 +371,7 @@ func test(c config) error {
 		workers []worker
 		r       = &run{}
 	)
-	logrus.Info("starting stress test run...")
+	log.L.Info("starting stress test run...")
 	// create the workers along with their spec
 	for i := 0; i < c.Concurrency; i++ {
 		wg.Add(1)
@@ -414,9 +418,9 @@ func test(c config) error {
 		results.ExecTotal = exec.count
 		results.ExecFailures = exec.failures
 	}
-	logrus.Infof("ending test run in %0.3f seconds", results.Seconds)
+	log.L.Infof("ending test run in %0.3f seconds", results.Seconds)
 
-	logrus.WithField("failures", r.failures).Infof(
+	log.L.WithField("failures", r.failures).Infof(
 		"create/start/delete %d containers in %0.3f seconds (%0.3f c/sec) or (%0.3f sec/c)",
 		results.Total,
 		results.Seconds,

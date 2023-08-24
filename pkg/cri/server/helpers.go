@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
 	clabels "github.com/containerd/containerd/labels"
+	"github.com/containerd/containerd/log"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
@@ -37,9 +38,8 @@ import (
 	runtimeoptions "github.com/containerd/containerd/pkg/runtimeoptions/v1"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/reference/docker"
-	"github.com/containerd/containerd/runtime/linux/runctypes"
 	runcoptions "github.com/containerd/containerd/runtime/v2/runc/options"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 
@@ -80,10 +80,6 @@ const (
 	containerKindSandbox = "sandbox"
 	// containerKindContainer is a label value indicating container is application container
 	containerKindContainer = "container"
-	// imageLabelKey is the label key indicating the image is managed by cri plugin.
-	imageLabelKey = criContainerdPrefix + ".image"
-	// imageLabelValue is the label value indicating the image is managed by cri plugin.
-	imageLabelValue = "managed"
 	// sandboxMetadataExtension is an extension name that identify metadata of sandbox in CreateContainerRequest
 	sandboxMetadataExtension = criContainerdPrefix + ".sandbox.metadata"
 	// containerMetadataExtension is an extension name that identify metadata of container in CreateContainerRequest
@@ -94,9 +90,6 @@ const (
 
 	// runtimeRunhcsV1 is the runtime type for runhcs.
 	runtimeRunhcsV1 = "io.containerd.runhcs.v1"
-
-	// name prefix for CRI server specific spans
-	criSpanPrefix = "pkg.cri.server"
 )
 
 // makeSandboxName generates sandbox name from sandbox metadata. The name
@@ -106,7 +99,7 @@ func makeSandboxName(s *runtime.PodSandboxMetadata) string {
 		s.Name,                       // 0
 		s.Namespace,                  // 1
 		s.Uid,                        // 2
-		fmt.Sprintf("%d", s.Attempt), // 3
+		strconv.Itoa(int(s.Attempt)), // 3
 	}, nameDelimiter)
 }
 
@@ -115,11 +108,11 @@ func makeSandboxName(s *runtime.PodSandboxMetadata) string {
 // unique.
 func makeContainerName(c *runtime.ContainerMetadata, s *runtime.PodSandboxMetadata) string {
 	return strings.Join([]string{
-		c.Name,                       // 0: container name
-		s.Name,                       // 1: pod name
-		s.Namespace,                  // 2: pod namespace
-		s.Uid,                        // 3: pod uid
-		fmt.Sprintf("%d", c.Attempt), // 4: attempt number of creating the container
+		c.Name,      // 0: container name
+		s.Name,      // 1: pod name
+		s.Namespace, // 2: pod namespace
+		s.Uid,       // 3: pod uid
+		strconv.FormatUint(uint64(c.Attempt), 10), // 4: attempt number of creating the container
 	}, nameDelimiter)
 }
 
@@ -299,7 +292,7 @@ func buildLabels(configLabels, imageConfigLabels map[string]string, containerTyp
 		} else {
 			// In case the image label is invalid, we output a warning and skip adding it to the
 			// container.
-			logrus.WithError(err).Warnf("unable to add image label with key %s to the container", k)
+			log.L.WithError(err).Warnf("unable to add image label with key %s to the container", k)
 		}
 	}
 	// labels from the CRI request (config) will override labels in the image config
@@ -339,17 +332,9 @@ func parseImageReferences(refs []string) ([]string, []string) {
 }
 
 // generateRuntimeOptions generates runtime options from cri plugin config.
-func generateRuntimeOptions(r criconfig.Runtime, c criconfig.Config) (interface{}, error) {
+func generateRuntimeOptions(r criconfig.Runtime) (interface{}, error) {
 	if r.Options == nil {
-		if r.Type != plugin.RuntimeLinuxV1 {
-			return nil, nil
-		}
-		// This is a legacy config, generate runctypes.RuncOptions.
-		return &runctypes.RuncOptions{
-			Runtime:       r.Engine,
-			RuntimeRoot:   r.Root,
-			SystemdCgroup: c.SystemdCgroup,
-		}, nil
+		return nil, nil
 	}
 	optionsTree, err := toml.TreeFromMap(r.Options)
 	if err != nil {
@@ -359,18 +344,24 @@ func generateRuntimeOptions(r criconfig.Runtime, c criconfig.Config) (interface{
 	if err := optionsTree.Unmarshal(options); err != nil {
 		return nil, err
 	}
+
+	// For generic configuration, if no config path specified (preserving old behavior), pass
+	// the whole TOML configuration section to the runtime.
+	if runtimeOpts, ok := options.(*runtimeoptions.Options); ok && runtimeOpts.ConfigPath == "" {
+		runtimeOpts.ConfigBody, err = optionsTree.Marshal()
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal TOML blob for runtime %q: %v", r.Type, err)
+		}
+	}
+
 	return options, nil
 }
 
 // getRuntimeOptionsType gets empty runtime options by the runtime type name.
 func getRuntimeOptionsType(t string) interface{} {
 	switch t {
-	case plugin.RuntimeRuncV1:
-		fallthrough
 	case plugin.RuntimeRuncV2:
 		return &runcoptions.Options{}
-	case plugin.RuntimeLinuxV1:
-		return &runctypes.RuncOptions{}
 	case runtimeRunhcsV1:
 		return &runhcsoptions.Options{}
 	default:
@@ -523,10 +514,8 @@ func copyResourcesToStatus(spec *runtimespec.Spec, status containerstore.Status)
 func (c *criService) generateAndSendContainerEvent(ctx context.Context, containerID string, sandboxID string, eventType runtime.ContainerEventType) {
 	podSandboxStatus, err := c.getPodSandboxStatus(ctx, sandboxID)
 	if err != nil {
-		// TODO(https://github.com/containerd/containerd/issues/7785):
-		// Do not skip events with nil PodSandboxStatus.
-		logrus.Errorf("Failed to get podSandbox status for container event for sandboxID %q: %v. Skipping sending the event.", sandboxID, err)
-		return
+		log.L.Warnf("Failed to get podSandbox status for container event for sandboxID %q: %v. Sending the event with nil podSandboxStatus.", sandboxID, err)
+		podSandboxStatus = nil
 	}
 	containerStatuses, err := c.getContainerStatuses(ctx, sandboxID)
 	if err != nil {
@@ -545,6 +534,7 @@ func (c *criService) generateAndSendContainerEvent(ctx context.Context, containe
 	select {
 	case c.containerEventsChan <- event:
 	default:
+		containerEventsDroppedCount.Inc()
 		logrus.Debugf("containerEventsChan is full, discarding event %+v", event)
 	}
 }

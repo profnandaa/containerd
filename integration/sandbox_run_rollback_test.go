@@ -39,7 +39,7 @@ import (
 	"github.com/containerd/containerd/pkg/cri/sbserver/podsandbox"
 	"github.com/containerd/containerd/pkg/cri/store/sandbox"
 	"github.com/containerd/containerd/pkg/failpoint"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 )
 
 const (
@@ -293,8 +293,7 @@ func TestRunPodSandboxAndTeardownCNISlow(t *testing.T) {
 	assert.Equal(t, sb.Metadata.Uid, sbConfig.Metadata.Uid)
 	assert.Equal(t, sb.Metadata.Attempt, sbConfig.Metadata.Attempt)
 
-	switch os.Getenv("ENABLE_CRI_SANDBOXES") {
-	case "":
+	if os.Getenv("DISABLE_CRI_SANDBOXES") != "" {
 		// non-sbserver
 		t.Log("Get sandbox info (non-sbserver)")
 		_, info, err := SandboxInfo(sb.Id)
@@ -311,15 +310,15 @@ func TestRunPodSandboxAndTeardownCNISlow(t *testing.T) {
 		t.Log("Get sandbox container")
 		c, err := GetContainer(sb.Id)
 		require.NoError(t, err)
-		any, ok := c.Extensions["io.cri-containerd.sandbox.metadata"]
+		md, ok := c.Extensions["io.cri-containerd.sandbox.metadata"]
 		require.True(t, ok, "sandbox metadata should exist in extension")
-		i, err := typeurl.UnmarshalAny(any)
+		i, err := typeurl.UnmarshalAny(md)
 		require.NoError(t, err)
 		require.IsType(t, &sandbox.Metadata{}, i)
 		metadata, ok := i.(*sandbox.Metadata)
 		require.True(t, ok)
 		assert.Equal(t, netNS, metadata.NetNSPath, "network namespace path should be the same in runtime spec and sandbox metadata")
-	default:
+	} else {
 		// sbserver
 		t.Log("Get sandbox info (sbserver)")
 		_, info, err := sbserverSandboxInfo(sb.Id)
@@ -328,7 +327,6 @@ func TestRunPodSandboxAndTeardownCNISlow(t *testing.T) {
 
 		assert.NotEmpty(t, info.Metadata.NetNSPath, "network namespace should be set")
 	}
-
 }
 
 // sbserverSandboxInfo gets sandbox info.

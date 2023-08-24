@@ -28,7 +28,7 @@ import (
 	"github.com/containerd/containerd/pkg/transfer/plugins"
 	"github.com/containerd/containerd/plugin"
 	ptypes "github.com/containerd/containerd/protobuf/types"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -94,7 +94,7 @@ func (s *service) Transfer(ctx context.Context, req *transferapi.TransferRequest
 			defer stream.Close()
 
 			pf := func(p transfer.Progress) {
-				any, err := typeurl.MarshalAny(&transferTypes.Progress{
+				progress, err := typeurl.MarshalAny(&transferTypes.Progress{
 					Event:    p.Event,
 					Name:     p.Name,
 					Parents:  p.Parents,
@@ -105,7 +105,7 @@ func (s *service) Transfer(ctx context.Context, req *transferapi.TransferRequest
 					log.G(ctx).WithError(err).Warnf("event could not be marshaled: %v/%v", p.Event, p.Name)
 					return
 				}
-				if err := stream.Send(any); err != nil {
+				if err := stream.Send(progress); err != nil {
 					log.G(ctx).WithError(err).Warnf("event not sent: %v/%v", p.Event, p.Name)
 					return
 				}

@@ -22,6 +22,9 @@ import (
 	"os"
 	"time"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/urfave/cli"
+
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cmd/ctr/commands"
 	"github.com/containerd/containerd/images/archive"
@@ -30,12 +33,11 @@ import (
 	tarchive "github.com/containerd/containerd/pkg/transfer/archive"
 	"github.com/containerd/containerd/pkg/transfer/image"
 	"github.com/containerd/containerd/platforms"
-	"github.com/urfave/cli"
 )
 
 var importCommand = cli.Command{
 	Name:      "import",
-	Usage:     "import images",
+	Usage:     "Import images",
 	ArgsUsage: "[flags] <in>",
 	Description: `Import images from a tar stream.
 Implemented formats:
@@ -58,43 +60,43 @@ If foobar.tar contains an OCI ref named "latest" and anonymous ref "sha256:deadb
 		cli.StringFlag{
 			Name:  "base-name",
 			Value: "",
-			Usage: "base image name for added images, when provided only images with this name prefix are imported",
+			Usage: "Base image name for added images, when provided only images with this name prefix are imported",
 		},
 		cli.BoolFlag{
 			Name:  "digests",
-			Usage: "whether to create digest images (default: false)",
+			Usage: "Whether to create digest images (default: false)",
 		},
 		cli.BoolFlag{
 			Name:  "skip-digest-for-named",
-			Usage: "skip applying --digests option to images named in the importing tar (use it in conjunction with --digests)",
+			Usage: "Skip applying --digests option to images named in the importing tar (use it in conjunction with --digests)",
 		},
 		cli.StringFlag{
 			Name:  "index-name",
-			Usage: "image name to keep index as, by default index is discarded",
+			Usage: "Image name to keep index as, by default index is discarded",
 		},
 		cli.BoolFlag{
 			Name:  "all-platforms",
-			Usage: "imports content for all platforms, false by default",
+			Usage: "Imports content for all platforms, false by default",
 		},
 		cli.StringFlag{
 			Name:  "platform",
-			Usage: "imports content for specific platform",
+			Usage: "Imports content for specific platform",
 		},
 		cli.BoolFlag{
 			Name:  "no-unpack",
-			Usage: "skip unpacking the images, cannot be used with --discard-unpacked-layers, false by default",
+			Usage: "Skip unpacking the images, cannot be used with --discard-unpacked-layers, false by default",
 		},
 		cli.BoolTFlag{
 			Name:  "local",
-			Usage: "run import locally rather than through transfer API",
+			Usage: "Run import locally rather than through transfer API",
 		},
 		cli.BoolFlag{
 			Name:  "compress-blobs",
-			Usage: "compress uncompressed blobs when creating manifest (Docker format only)",
+			Usage: "Compress uncompressed blobs when creating manifest (Docker format only)",
 		},
 		cli.BoolFlag{
 			Name:  "discard-unpacked-layers",
-			Usage: "allow the garbage collector to clean layers up from the content store after unpacking, cannot be used with --no-unpack, false by default",
+			Usage: "Allow the garbage collector to clean layers up from the content store after unpacking, cannot be used with --no-unpack, false by default",
 		},
 	}, commands.SnapshotterFlags...),
 
@@ -114,21 +116,47 @@ If foobar.tar contains an OCI ref named "latest" and anonymous ref "sha256:deadb
 		if !context.BoolT("local") {
 			var opts []image.StoreOpt
 			prefix := context.String("base-name")
+			var overwrite bool
 			if prefix == "" {
 				prefix = fmt.Sprintf("import-%s", time.Now().Format("2006-01-02"))
-				opts = append(opts, image.WithNamePrefix(prefix, false))
-			} else {
-				// When provided, filter out references which do not match
-				opts = append(opts, image.WithNamePrefix(prefix, true))
+				// Allow overwriting auto-generated prefix with named annotation
+				overwrite = true
 			}
 
 			if context.Bool("digests") {
-				opts = append(opts, image.WithDigestRefs(!context.Bool("skip-digest-for-named")))
+				opts = append(opts, image.WithDigestRef(prefix, overwrite, !context.Bool("skip-digest-for-named")))
+			} else {
+				opts = append(opts, image.WithNamedPrefix(prefix, overwrite))
 			}
 
-			// TODO: Add platform options
+			var platSpec ocispec.Platform
+			// Only when all-platforms not specified, we will check platform value
+			// Implicitly if the platforms is empty, it means all-platforms
+			if !context.Bool("all-platforms") {
+				// If platform specified, use that one, if not use default
+				if platform := context.String("platform"); platform != "" {
+					platSpec, err = platforms.Parse(platform)
+					if err != nil {
+						return err
+					}
+				} else {
+					platSpec = platforms.DefaultSpec()
+				}
+				opts = append(opts, image.WithPlatforms(platSpec))
+			}
 
-			// TODO: Add unpack options
+			if !context.Bool("no-unpack") {
+				snapshotter := context.String("snapshotter")
+				// If OS field is not empty, it means platSpec was updated in the above block
+				// i.e all-platforms was not specified
+				if platSpec.OS != "" {
+					opts = append(opts, image.WithUnpack(platSpec, snapshotter))
+				} else {
+					// Empty spec means all platforms
+					var emptySpec ocispec.Platform
+					opts = append(opts, image.WithUnpack(emptySpec, snapshotter))
+				}
+			}
 
 			is := image.NewStore(context.String("index-name"), opts...)
 
@@ -239,7 +267,7 @@ If foobar.tar contains an OCI ref named "latest" and anonymous ref "sha256:deadb
 
 			for _, img := range imgs {
 				if platformMatcher == nil { // if platform not specified use default.
-					platformMatcher = platforms.Default()
+					platformMatcher = platforms.DefaultStrict()
 				}
 				image := containerd.NewImageWithPlatform(client, img, platformMatcher)
 

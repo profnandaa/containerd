@@ -36,7 +36,6 @@ import (
 	srvconfig "github.com/containerd/containerd/services/server/config"
 	"github.com/containerd/containerd/sys"
 	"github.com/containerd/containerd/version"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	"google.golang.org/grpc/grpclog"
 )
@@ -80,16 +79,16 @@ can be used and modified as necessary as a custom configuration.`
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
 			Name:  "config,c",
-			Usage: "path to the configuration file",
+			Usage: "Path to the configuration file",
 			Value: filepath.Join(defaults.DefaultConfigDir, "config.toml"),
 		},
 		cli.StringFlag{
 			Name:  "log-level,l",
-			Usage: "set the logging level [trace, debug, info, warn, error, fatal, panic]",
+			Usage: "Set the logging level [trace, debug, info, warn, error, fatal, panic]",
 		},
 		cli.StringFlag{
 			Name:  "address,a",
-			Usage: "address for containerd's GRPC server",
+			Usage: "Address for containerd's GRPC server",
 		},
 		cli.StringFlag{
 			Name:  "root",
@@ -132,6 +131,16 @@ can be used and modified as necessary as a custom configuration.`
 			return err
 		}
 
+		if config.GRPC.Address == "" {
+			return fmt.Errorf("grpc address cannot be empty: %w", errdefs.ErrInvalidArgument)
+		}
+		if config.TTRPC.Address == "" {
+			// If TTRPC was not explicitly configured, use defaults based on GRPC.
+			config.TTRPC.Address = config.GRPC.Address + ".ttrpc"
+			config.TTRPC.UID = config.GRPC.UID
+			config.TTRPC.GID = config.GRPC.GID
+		}
+
 		// Make sure top-level directories are created early.
 		if err := server.CreateTopLevelDirectories(config); err != nil {
 			return err
@@ -140,7 +149,7 @@ can be used and modified as necessary as a custom configuration.`
 		// Stop if we are registering or unregistering against Windows SCM.
 		stop, err := registerUnregisterService(config.Root)
 		if err != nil {
-			logrus.Fatal(err)
+			log.L.Fatal(err)
 		}
 		if stop {
 			return nil
@@ -164,16 +173,7 @@ can be used and modified as necessary as a custom configuration.`
 			log.G(ctx).WithError(w).Warn("cleanup temp mount")
 		}
 
-		if config.GRPC.Address == "" {
-			return fmt.Errorf("grpc address cannot be empty: %w", errdefs.ErrInvalidArgument)
-		}
-		if config.TTRPC.Address == "" {
-			// If TTRPC was not explicitly configured, use defaults based on GRPC.
-			config.TTRPC.Address = fmt.Sprintf("%s.ttrpc", config.GRPC.Address)
-			config.TTRPC.UID = config.GRPC.UID
-			config.TTRPC.GID = config.GRPC.GID
-		}
-		log.G(ctx).WithFields(logrus.Fields{
+		log.G(ctx).WithFields(log.Fields{
 			"version":  version.Version,
 			"revision": version.Revision,
 		}).Info("starting containerd")
@@ -202,7 +202,7 @@ can be used and modified as necessary as a custom configuration.`
 
 			// Launch as a Windows Service if necessary
 			if err := launchService(server, done); err != nil {
-				logrus.Fatal(err)
+				log.L.Fatal(err)
 			}
 			select {
 			case <-ctx.Done():
@@ -270,12 +270,21 @@ can be used and modified as necessary as a custom configuration.`
 		}
 		serve(ctx, l, server.ServeGRPC)
 
-		if err := notifyReady(ctx); err != nil {
-			log.G(ctx).WithError(err).Warn("notify ready failed")
-		}
+		readyC := make(chan struct{})
+		go func() {
+			server.Wait()
+			close(readyC)
+		}()
 
-		log.G(ctx).Infof("containerd successfully booted in %fs", time.Since(start).Seconds())
-		<-done
+		select {
+		case <-readyC:
+			if err := notifyReady(ctx); err != nil {
+				log.G(ctx).WithError(err).Warn("notify ready failed")
+			}
+			log.G(ctx).Infof("containerd successfully booted in %fs", time.Since(start).Seconds())
+			<-done
+		case <-done:
+		}
 		return nil
 	}
 	return app
@@ -342,36 +351,18 @@ func setLogLevel(context *cli.Context, config *srvconfig.Config) error {
 		l = config.Debug.Level
 	}
 	if l != "" {
-		lvl, err := logrus.ParseLevel(l)
-		if err != nil {
-			return err
-		}
-		logrus.SetLevel(lvl)
+		return log.SetLevel(l)
 	}
 	return nil
 }
 
 func setLogFormat(config *srvconfig.Config) error {
-	f := config.Debug.Format
+	f := log.OutputFormat(config.Debug.Format)
 	if f == "" {
 		f = log.TextFormat
 	}
 
-	switch f {
-	case log.TextFormat:
-		logrus.SetFormatter(&logrus.TextFormatter{
-			TimestampFormat: log.RFC3339NanoFixed,
-			FullTimestamp:   true,
-		})
-	case log.JSONFormat:
-		logrus.SetFormatter(&logrus.JSONFormatter{
-			TimestampFormat: log.RFC3339NanoFixed,
-		})
-	default:
-		return fmt.Errorf("unknown log format: %s", f)
-	}
-
-	return nil
+	return log.SetFormat(f)
 }
 
 func dumpStacks(writeToFile bool) {
@@ -386,7 +377,7 @@ func dumpStacks(writeToFile bool) {
 		bufferLen *= 2
 	}
 	buf = buf[:stackSize]
-	logrus.Infof("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf)
+	log.L.Infof("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf)
 
 	if writeToFile {
 		// Also write to file to aid gathering diagnostics
@@ -397,6 +388,6 @@ func dumpStacks(writeToFile bool) {
 		}
 		defer f.Close()
 		f.WriteString(string(buf))
-		logrus.Infof("goroutine stack dump written to %s", name)
+		log.L.Infof("goroutine stack dump written to %s", name)
 	}
 }

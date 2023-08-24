@@ -35,11 +35,11 @@ type pprofDialer struct {
 // Command is the cli command for providing golang pprof outputs for containerd
 var Command = cli.Command{
 	Name:  "pprof",
-	Usage: "provide golang pprof outputs for containerd",
+	Usage: "Provide golang pprof outputs for containerd",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "debug-socket, d",
-			Usage: "socket path for containerd's debug server",
+			Usage: "Socket path for containerd's debug server",
 			Value: defaults.DefaultDebugAddress,
 		},
 	},
@@ -55,11 +55,11 @@ var Command = cli.Command{
 
 var pprofGoroutinesCommand = cli.Command{
 	Name:  "goroutines",
-	Usage: "dump goroutine stack dump",
+	Usage: "Dump goroutine stack dump",
 	Flags: []cli.Flag{
 		cli.UintFlag{
 			Name:  "debug",
-			Usage: "debug pprof args",
+			Usage: "Debug pprof args",
 			Value: 2,
 		},
 	},
@@ -79,11 +79,11 @@ var pprofGoroutinesCommand = cli.Command{
 
 var pprofHeapCommand = cli.Command{
 	Name:  "heap",
-	Usage: "dump heap profile",
+	Usage: "Dump heap profile",
 	Flags: []cli.Flag{
 		cli.UintFlag{
 			Name:  "debug",
-			Usage: "debug pprof args",
+			Usage: "Debug pprof args",
 			Value: 0,
 		},
 	},
@@ -107,12 +107,12 @@ var pprofProfileCommand = cli.Command{
 	Flags: []cli.Flag{
 		cli.DurationFlag{
 			Name:  "seconds,s",
-			Usage: "duration for collection (seconds)",
+			Usage: "Duration for collection (seconds)",
 			Value: 30 * time.Second,
 		},
 		cli.UintFlag{
 			Name:  "debug",
-			Usage: "debug pprof args",
+			Usage: "Debug pprof args",
 			Value: 0,
 		},
 	},
@@ -133,16 +133,16 @@ var pprofProfileCommand = cli.Command{
 
 var pprofTraceCommand = cli.Command{
 	Name:  "trace",
-	Usage: "collect execution trace",
+	Usage: "Collect execution trace",
 	Flags: []cli.Flag{
 		cli.DurationFlag{
 			Name:  "seconds,s",
-			Usage: "trace time (seconds)",
+			Usage: "Trace time (seconds)",
 			Value: 5 * time.Second,
 		},
 		cli.UintFlag{
 			Name:  "debug",
-			Usage: "debug pprof args",
+			Usage: "Debug pprof args",
 			Value: 0,
 		},
 	},
@@ -164,11 +164,11 @@ var pprofTraceCommand = cli.Command{
 
 var pprofBlockCommand = cli.Command{
 	Name:  "block",
-	Usage: "goroutine blocking profile",
+	Usage: "Goroutine blocking profile",
 	Flags: []cli.Flag{
 		cli.UintFlag{
 			Name:  "debug",
-			Usage: "debug pprof args",
+			Usage: "Debug pprof args",
 			Value: 0,
 		},
 	},
@@ -188,11 +188,11 @@ var pprofBlockCommand = cli.Command{
 
 var pprofThreadcreateCommand = cli.Command{
 	Name:  "threadcreate",
-	Usage: "goroutine thread creating profile",
+	Usage: "Goroutine thread creating profile",
 	Flags: []cli.Flag{
 		cli.UintFlag{
 			Name:  "debug",
-			Usage: "debug pprof args",
+			Usage: "Debug pprof args",
 			Value: 0,
 		},
 	},
@@ -225,7 +225,7 @@ func httpGetRequest(client *http.Client, request string) (io.ReadCloser, error) 
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		return nil, fmt.Errorf("http get failed with status: %s", resp.Status)
 	}

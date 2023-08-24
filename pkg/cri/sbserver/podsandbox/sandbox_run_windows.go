@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/oci"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/containerd/containerd/pkg/cri/annotations"
 	customopts "github.com/containerd/containerd/pkg/cri/opts"
+	"github.com/containerd/containerd/snapshots"
 )
 
 func (c *Controller) sandboxContainerSpec(id string, config *runtime.PodSandboxConfig,
@@ -80,14 +80,9 @@ func (c *Controller) sandboxContainerSpec(id string, config *runtime.PodSandboxC
 		specOpts = append(specOpts, customopts.WithAnnotation(pKey, pValue))
 	}
 
+	specOpts = append(specOpts, customopts.WithAnnotation(annotations.WindowsHostProcess, strconv.FormatBool(config.GetWindows().GetSecurityContext().GetHostProcess())))
 	specOpts = append(specOpts,
-		customopts.WithAnnotation(annotations.ContainerType, annotations.ContainerTypeSandbox),
-		customopts.WithAnnotation(annotations.SandboxID, id),
-		customopts.WithAnnotation(annotations.SandboxNamespace, config.GetMetadata().GetNamespace()),
-		customopts.WithAnnotation(annotations.SandboxUID, config.GetMetadata().GetUid()),
-		customopts.WithAnnotation(annotations.SandboxName, config.GetMetadata().GetName()),
-		customopts.WithAnnotation(annotations.SandboxLogDir, config.GetLogDirectory()),
-		customopts.WithAnnotation(annotations.WindowsHostProcess, strconv.FormatBool(config.GetWindows().GetSecurityContext().GetHostProcess())),
+		annotations.DefaultCRIAnnotations(id, "", "", config, true)...,
 	)
 
 	return c.runtimeSpec(id, "", specOpts...)
@@ -108,7 +103,7 @@ func (c *Controller) cleanupSandboxFiles(id string, config *runtime.PodSandboxCo
 	return nil
 }
 
-// No task options needed for windows.
-func (c *Controller) taskOpts(runtimeType string) []containerd.NewTaskOpts {
-	return nil
+// No sandbox snapshotter options needed for windows.
+func sandboxSnapshotterOpts(config *runtime.PodSandboxConfig) ([]snapshots.Opt, error) {
+	return []snapshots.Opt{}, nil
 }

@@ -19,12 +19,16 @@ package local
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/transfer"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/containerd/containerd/pkg/unpack"
 )
 
 func (ts *localTransferService) importStream(ctx context.Context, i transfer.ImageImporter, is transfer.ImageStorer, tops *transfer.Config) error {
@@ -45,12 +49,16 @@ func (ts *localTransferService) importStream(ctx context.Context, i transfer.Ima
 		return err
 	}
 
-	var descriptors []ocispec.Descriptor
+	var (
+		descriptors []ocispec.Descriptor
+		handler     images.Handler
+		unpacker    *unpack.Unpacker
+	)
 
 	// If save index, add index
 	descriptors = append(descriptors, index)
 
-	var handler images.HandlerFunc = func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+	var handlerFunc images.HandlerFunc = func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		// Only save images at top level
 		if desc.Digest != index.Digest {
 			return images.Children(ctx, ts.content, desc)
@@ -67,41 +75,65 @@ func (ts *localTransferService) importStream(ctx context.Context, i transfer.Ima
 		}
 
 		for _, m := range idx.Manifests {
-			m1 := m
-			m1.Annotations = mergeMap(m.Annotations, map[string]string{"io.containerd.import.ref-type": "name"})
-			descriptors = append(descriptors, m1)
-
-			// If add digest references, add twice
-			m2 := m
-			m2.Annotations = mergeMap(m.Annotations, map[string]string{"io.containerd.import.ref-type": "digest"})
-			descriptors = append(descriptors, m2)
+			m.Annotations = mergeMap(m.Annotations, map[string]string{"io.containerd.import.ref-source": "annotation"})
+			descriptors = append(descriptors, m)
 		}
 
 		return idx.Manifests, nil
 	}
 
 	if f, ok := is.(transfer.ImageFilterer); ok {
-		handler = f.ImageFilter(handler, ts.content)
+		handlerFunc = f.ImageFilter(handlerFunc, ts.content)
+	}
+
+	handler = images.Handlers(handlerFunc)
+
+	// First find suitable platforms to unpack into
+	// If image storer is also an unpacker type, i.e implemented UnpackPlatforms() func
+	if iu, ok := is.(transfer.ImageUnpacker); ok {
+		unpacks := iu.UnpackPlatforms()
+		if len(unpacks) > 0 {
+			uopts := []unpack.UnpackerOpt{}
+			for _, u := range unpacks {
+				matched, mu := getSupportedPlatform(u, ts.config.UnpackPlatforms)
+				if matched {
+					uopts = append(uopts, unpack.WithUnpackPlatform(mu))
+				}
+			}
+
+			if ts.config.DuplicationSuppressor != nil {
+				uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
+			}
+			unpacker, err = unpack.NewUnpacker(ctx, ts.content, uopts...)
+			if err != nil {
+				return fmt.Errorf("unable to initialize unpacker: %w", err)
+			}
+			handler = unpacker.Unpack(handler)
+		}
 	}
 
 	if err := images.WalkNotEmpty(ctx, handler, index); err != nil {
+		// TODO: Handle Not Empty as a special case on the input
 		return err
 	}
 
 	for _, desc := range descriptors {
-		img, err := is.Store(ctx, desc, ts.images)
+		imgs, err := is.Store(ctx, desc, ts.images)
 		if err != nil {
 			if errdefs.IsNotFound(err) {
+				log.G(ctx).Infof("No images store for %s", desc.Digest)
 				continue
 			}
 			return err
 		}
 
 		if tops.Progress != nil {
-			tops.Progress(transfer.Progress{
-				Event: "saved",
-				Name:  img.Name,
-			})
+			for _, img := range imgs {
+				tops.Progress(transfer.Progress{
+					Event: "saved",
+					Name:  img.Name,
+				})
+			}
 		}
 	}
 

@@ -128,7 +128,7 @@ func TestMatchComparerMatch_WCOW(t *testing.T) {
 				Architecture: "amd64",
 				OS:           "windows",
 			},
-			match: false,
+			match: true,
 		},
 		{
 			platform: imagespec.Platform{
@@ -139,6 +139,110 @@ func TestMatchComparerMatch_WCOW(t *testing.T) {
 		},
 	} {
 		assert.Equal(t, test.match, m.Match(test.platform), "should match: %t, %s to %s", test.match, m.Platform, test.platform)
+	}
+}
+
+// TestMatchComparerMatch_ABICheckWCOW checks windows platform matcher
+// behavior for stable ABI and non-stable ABI compliant versions
+func TestMatchComparerMatch_ABICheckWCOW(t *testing.T) {
+	platformWS2019 := imagespec.Platform{
+		Architecture: "amd64",
+		OS:           "windows",
+		OSVersion:    "10.0.17763",
+	}
+	platformWS2022 := imagespec.Platform{
+		Architecture: "amd64",
+		OS:           "windows",
+		OSVersion:    "10.0.20348",
+	}
+	platformWindows11 := imagespec.Platform{
+		Architecture: "amd64",
+		OS:           "windows",
+		OSVersion:    "10.0.22621",
+	}
+	matcherWS2019 := windowsmatcher{
+		Platform:        platformWS2019,
+		osVersionPrefix: platformWS2019.OSVersion,
+		defaultMatcher: &matcher{
+			Platform: Normalize(platformWS2019),
+		},
+	}
+	matcherWS2022 := windowsmatcher{
+		Platform:        platformWS2022,
+		osVersionPrefix: platformWS2022.OSVersion,
+		defaultMatcher: &matcher{
+			Platform: Normalize(platformWS2022),
+		},
+	}
+	matcherWindows11 := windowsmatcher{
+		Platform:        platformWindows11,
+		osVersionPrefix: platformWindows11.OSVersion,
+		defaultMatcher: &matcher{
+			Platform: Normalize(platformWindows11),
+		},
+	}
+
+	for _, test := range []struct {
+		hostPlatformMatcher windowsmatcher
+		testPlatform        imagespec.Platform
+		match               bool
+	}{
+		{
+			hostPlatformMatcher: matcherWS2019,
+			testPlatform: imagespec.Platform{
+				Architecture: "amd64",
+				OS:           "windows",
+				OSVersion:    "10.0.17763",
+			},
+			match: true,
+		},
+		{
+			hostPlatformMatcher: matcherWS2019,
+			testPlatform: imagespec.Platform{
+				Architecture: "amd64",
+				OS:           "windows",
+				OSVersion:    "10.0.20348",
+			},
+			match: false,
+		},
+		{
+			hostPlatformMatcher: matcherWS2022,
+			testPlatform: imagespec.Platform{
+				Architecture: "amd64",
+				OS:           "windows",
+				OSVersion:    "10.0.17763",
+			},
+			match: false,
+		},
+		{
+			hostPlatformMatcher: matcherWS2022,
+			testPlatform: imagespec.Platform{
+				Architecture: "amd64",
+				OS:           "windows",
+				OSVersion:    "10.0.20348",
+			},
+			match: true,
+		},
+		{
+			hostPlatformMatcher: matcherWindows11,
+			testPlatform: imagespec.Platform{
+				Architecture: "amd64",
+				OS:           "windows",
+				OSVersion:    "10.0.17763",
+			},
+			match: false,
+		},
+		{
+			hostPlatformMatcher: matcherWindows11,
+			testPlatform: imagespec.Platform{
+				Architecture: "amd64",
+				OS:           "windows",
+				OSVersion:    "10.0.20348",
+			},
+			match: true,
+		},
+	} {
+		assert.Equal(t, test.match, test.hostPlatformMatcher.Match(test.testPlatform), "should match: %t, %s to %s", test.match, test.hostPlatformMatcher.Platform, test.testPlatform)
 	}
 }
 
@@ -251,11 +355,11 @@ func TestMatchComparerLess(t *testing.T) {
 		{
 			Architecture: "amd64",
 			OS:           "windows",
-			OSVersion:    "10.0.17764.1",
 		},
 		{
 			Architecture: "amd64",
 			OS:           "windows",
+			OSVersion:    "10.0.17764.1",
 		},
 		{
 			Architecture: "amd64",

@@ -27,12 +27,11 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 )
 
@@ -43,21 +42,18 @@ func (c *criService) UpdateContainerResources(ctx context.Context, r *runtime.Up
 		return nil, fmt.Errorf("failed to find container: %w", err)
 	}
 
-	var sandbox sandboxstore.Sandbox
-	if c.nri.isEnabled() {
-		sandbox, err = c.sandboxStore.Get(container.SandboxID)
-		if err != nil {
-			return nil, err
-		}
+	sandbox, err := c.sandboxStore.Get(container.SandboxID)
+	if err != nil {
+		return nil, err
+	}
 
-		resources := r.GetLinux()
-		updated, err := c.nri.updateContainer(ctx, &sandbox, &container, resources)
-		if err != nil {
-			return nil, fmt.Errorf("NRI container update failed: %w", err)
-		}
-		if updated != nil {
-			*resources = *updated
-		}
+	resources := r.GetLinux()
+	updated, err := c.nri.UpdateContainerResources(ctx, &sandbox, &container, resources)
+	if err != nil {
+		return nil, fmt.Errorf("NRI container update failed: %w", err)
+	}
+	if updated != nil {
+		*resources = *updated
 	}
 
 	// Update resources in status update transaction, so that:
@@ -69,11 +65,9 @@ func (c *criService) UpdateContainerResources(ctx context.Context, r *runtime.Up
 		return nil, fmt.Errorf("failed to update resources: %w", err)
 	}
 
-	if c.nri.isEnabled() {
-		err = c.nri.postUpdateContainer(ctx, &sandbox, &container)
-		if err != nil {
-			log.G(ctx).WithError(err).Errorf("NRI post-update notification failed")
-		}
+	err = c.nri.PostUpdateContainerResources(ctx, &sandbox, &container)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("NRI post-update notification failed")
 	}
 
 	return &runtime.UpdateContainerResourcesResponse{}, nil
@@ -148,12 +142,12 @@ func (c *criService) updateContainerResources(ctx context.Context,
 
 // updateContainerSpec updates container spec.
 func updateContainerSpec(ctx context.Context, cntr containerd.Container, spec *runtimespec.Spec) error {
-	any, err := typeurl.MarshalAny(spec)
+	s, err := typeurl.MarshalAny(spec)
 	if err != nil {
 		return fmt.Errorf("failed to marshal spec %+v: %w", spec, err)
 	}
 	if err := cntr.Update(ctx, func(ctx gocontext.Context, client *containerd.Client, c *containers.Container) error {
-		c.Spec = any
+		c.Spec = s
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to update container spec: %w", err)

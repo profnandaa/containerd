@@ -21,9 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	goruntime "runtime"
 	"time"
 
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	"github.com/davecgh/go-spew/spew"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
@@ -39,7 +40,6 @@ import (
 	customopts "github.com/containerd/containerd/pkg/cri/opts"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 	"github.com/containerd/containerd/pkg/cri/util"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 )
 
 func init() {
@@ -204,7 +204,14 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		for _, v := range volumeMounts {
 			mountMap[filepath.Clean(v.HostPath)] = v.ContainerPath
 		}
-		opts = append(opts, customopts.WithVolumes(mountMap))
+		platform := imagespec.Platform{
+			OS:           image.ImageSpec.OS,
+			Architecture: image.ImageSpec.Architecture,
+			OSVersion:    image.ImageSpec.OSVersion,
+			OSFeatures:   image.ImageSpec.OSFeatures,
+			Variant:      image.ImageSpec.Variant,
+		}
+		opts = append(opts, customopts.WithVolumes(mountMap, platform))
 	}
 	meta.ImageRef = image.ID
 	meta.StopSignal = image.ImageSpec.Config.StopSignal
@@ -250,17 +257,14 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		containerd.WithContainerLabels(containerLabels),
 		containerd.WithContainerExtension(containerMetadataExtension, &meta))
 
-	if c.nri.isEnabled() {
-		opts = append(opts, c.nri.WithContainerAdjustment())
-
-		defer func() {
-			if retErr != nil {
-				deferCtx, deferCancel := ctrdutil.DeferContext()
-				defer deferCancel()
-				c.nri.undoCreateContainer(deferCtx, &sandbox, id, spec)
-			}
-		}()
-	}
+	opts = append(opts, c.nri.WithContainerAdjustment())
+	defer func() {
+		if retErr != nil {
+			deferCtx, deferCancel := util.DeferContext()
+			defer deferCancel()
+			c.nri.UndoCreateContainer(deferCtx, &sandbox, id, spec)
+		}
+	}()
 
 	var cntr containerd.Container
 	if cntr, err = c.client.NewContainer(ctx, id, opts...); err != nil {
@@ -268,7 +272,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}
 	defer func() {
 		if retErr != nil {
-			deferCtx, deferCancel := ctrdutil.DeferContext()
+			deferCtx, deferCancel := util.DeferContext()
 			defer deferCancel()
 			if err := cntr.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
 				log.G(ctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
@@ -301,11 +305,9 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}
 	c.generateAndSendContainerEvent(ctx, id, sandboxID, runtime.ContainerEventType_CONTAINER_CREATED_EVENT)
 
-	if c.nri.isEnabled() {
-		err = c.nri.postCreateContainer(ctx, &sandbox, &container)
-		if err != nil {
-			log.G(ctx).WithError(err).Errorf("NRI post-create notification failed")
-		}
+	err = c.nri.PostCreateContainer(ctx, &sandbox, &container)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("NRI post-create notification failed")
 	}
 
 	containerCreateTimer.WithValues(ociRuntime.Type).UpdateSince(start)
@@ -331,6 +333,11 @@ func (c *criService) volumeMounts(containerRootDir string, criMounts []*runtime.
 		}
 		volumeID := util.GenerateID()
 		src := filepath.Join(containerRootDir, "volumes", volumeID)
+		if !filepath.IsAbs(dst) && goruntime.GOOS != "windows" {
+			oldDst := dst
+			dst = filepath.Join("/", dst)
+			log.L.Debugf("Volume destination %q is not absolute, converted to %q", oldDst, dst)
+		}
 		// addOCIBindMounts will create these volumes.
 		mounts = append(mounts, &runtime.Mount{
 			ContainerPath:  dst,
@@ -344,7 +351,7 @@ func (c *criService) volumeMounts(containerRootDir string, criMounts []*runtime.
 // runtimeSpec returns a default runtime spec used in cri-containerd.
 func (c *criService) runtimeSpec(id string, baseSpecFile string, opts ...oci.SpecOpts) (*runtimespec.Spec, error) {
 	// GenerateSpec needs namespace.
-	ctx := ctrdutil.NamespacedContext()
+	ctx := util.NamespacedContext()
 	container := &containers.Container{ID: id}
 
 	if baseSpecFile != "" {

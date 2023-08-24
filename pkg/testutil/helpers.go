@@ -23,7 +23,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/containerd/containerd/mount"
+	"github.com/stretchr/testify/assert"
 )
+
+const umountflags int = 0
 
 var rootEnabled bool
 
@@ -78,4 +83,11 @@ func DumpDirOnFailure(t *testing.T, root string) {
 	if t.Failed() {
 		DumpDir(t, root)
 	}
+}
+
+// Unmount unmounts a given mountPoint and sets t.Error if it fails
+func Unmount(t testing.TB, mountPoint string) {
+	t.Log("unmount", mountPoint)
+	err := mount.UnmountAll(mountPoint, umountflags)
+	assert.NoError(t, err)
 }

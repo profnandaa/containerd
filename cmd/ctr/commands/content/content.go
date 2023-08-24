@@ -42,7 +42,7 @@ var (
 	// Command is the cli command for managing content
 	Command = cli.Command{
 		Name:  "content",
-		Usage: "manage content",
+		Usage: "Manage content",
 		Subcommands: cli.Commands{
 			activeIngestCommand,
 			deleteCommand,
@@ -61,7 +61,7 @@ var (
 
 	getCommand = cli.Command{
 		Name:        "get",
-		Usage:       "get the data for an object",
+		Usage:       "Get the data for an object",
 		ArgsUsage:   "[<digest>, ...]",
 		Description: "display the image object",
 		Action: func(context *cli.Context) error {
@@ -90,17 +90,17 @@ var (
 
 	ingestCommand = cli.Command{
 		Name:        "ingest",
-		Usage:       "accept content into the store",
+		Usage:       "Accept content into the store",
 		ArgsUsage:   "[flags] <key>",
 		Description: "ingest objects into the local content store",
 		Flags: []cli.Flag{
 			cli.Int64Flag{
 				Name:  "expected-size",
-				Usage: "validate against provided size",
+				Usage: "Validate against provided size",
 			},
 			cli.StringFlag{
 				Name:  "expected-digest",
-				Usage: "verify content against expected digest",
+				Usage: "Verify content against expected digest",
 			},
 		},
 		Action: func(context *cli.Context) error {
@@ -132,18 +132,18 @@ var (
 
 	activeIngestCommand = cli.Command{
 		Name:        "active",
-		Usage:       "display active transfers",
+		Usage:       "Display active transfers",
 		ArgsUsage:   "[flags] [<regexp>]",
 		Description: "display the ongoing transfers",
 		Flags: []cli.Flag{
 			cli.DurationFlag{
 				Name:   "timeout, t",
-				Usage:  "total timeout for fetch",
+				Usage:  "Total timeout for fetch",
 				EnvVar: "CONTAINERD_FETCH_TIMEOUT",
 			},
 			cli.StringFlag{
 				Name:  "root",
-				Usage: "path to content store root",
+				Usage: "Path to content store root",
 				Value: "/tmp/content", // TODO(stevvooe): for now, just use the PWD/.content
 			},
 		},
@@ -175,13 +175,13 @@ var (
 	listCommand = cli.Command{
 		Name:        "list",
 		Aliases:     []string{"ls"},
-		Usage:       "list all blobs in the store",
+		Usage:       "List all blobs in the store",
 		ArgsUsage:   "[flags]",
 		Description: "list blobs in the content store",
 		Flags: []cli.Flag{
 			cli.BoolFlag{
 				Name:  "quiet, q",
-				Usage: "print only the blob digest",
+				Usage: "Print only the blob digest",
 			},
 		},
 		Action: func(context *cli.Context) error {
@@ -234,7 +234,7 @@ var (
 
 	setLabelsCommand = cli.Command{
 		Name:        "label",
-		Usage:       "add labels to content",
+		Usage:       "Add labels to content",
 		ArgsUsage:   "<digest> [<label>=<value> ...]",
 		Description: "labels blobs in the content store",
 		Action: func(context *cli.Context) error {
@@ -288,17 +288,17 @@ var (
 
 	editCommand = cli.Command{
 		Name:        "edit",
-		Usage:       "edit a blob and return a new digest",
+		Usage:       "Edit a blob and return a new digest",
 		ArgsUsage:   "[flags] <digest>",
 		Description: "edit a blob and return a new digest",
 		Flags: []cli.Flag{
 			cli.StringFlag{
 				Name:  "validate",
-				Usage: "validate the result against a format (json, mediatype, etc.)",
+				Usage: "Validate the result against a format (json, mediatype, etc.)",
 			},
 			cli.StringFlag{
 				Name:   "editor",
-				Usage:  "select editor (vim, emacs, etc.)",
+				Usage:  "Select editor (vim, emacs, etc.)",
 				EnvVar: "EDITOR",
 			},
 		},
@@ -358,7 +358,7 @@ var (
 	deleteCommand = cli.Command{
 		Name:      "delete",
 		Aliases:   []string{"del", "remove", "rm"},
-		Usage:     "permanently delete one or more blobs",
+		Usage:     "Permanently delete one or more blobs",
 		ArgsUsage: "[<digest>, ...]",
 		Description: `Delete one or more blobs permanently. Successfully deleted
 	blobs are printed to stdout.`,
@@ -406,7 +406,7 @@ var (
 	// needed.
 	fetchObjectCommand = cli.Command{
 		Name:        "fetch-object",
-		Usage:       "retrieve objects from a remote",
+		Usage:       "Retrieve objects from a remote",
 		ArgsUsage:   "[flags] <remote> <object> [<hint>, ...]",
 		Description: `Fetch objects by identifier from a remote.`,
 		Flags:       commands.RegistryFlags,
@@ -448,10 +448,15 @@ var (
 
 	fetchBlobCommand = cli.Command{
 		Name:        "fetch-blob",
-		Usage:       "retrieve blobs from a remote",
+		Usage:       "Retrieve blobs from a remote",
 		ArgsUsage:   "[flags] <remote> [<digest>, ...]",
 		Description: `Fetch blobs by digests from a remote.`,
-		Flags:       commands.RegistryFlags,
+		Flags: append(commands.RegistryFlags, []cli.Flag{
+			cli.StringFlag{
+				Name:  "media-type",
+				Usage: "Specify target mediatype for request header",
+			},
+		}...),
 		Action: func(context *cli.Context) error {
 			var (
 				ref     = context.Args().First()
@@ -486,7 +491,7 @@ var (
 				if err != nil {
 					return err
 				}
-				rc, _, err := fetcherByDigest.FetchByDigest(ctx, dgst)
+				rc, _, err := fetcherByDigest.FetchByDigest(ctx, dgst, remotes.WithMediaType(context.String("media-type")))
 				if err != nil {
 					return err
 				}
@@ -502,7 +507,7 @@ var (
 
 	pushObjectCommand = cli.Command{
 		Name:        "push-object",
-		Usage:       "push an object to a remote",
+		Usage:       "Push an object to a remote",
 		ArgsUsage:   "[flags] <remote> <object> <type>",
 		Description: `Push objects by identifier to a remote.`,
 		Flags:       commands.RegistryFlags,

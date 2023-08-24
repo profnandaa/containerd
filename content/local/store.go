@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +31,7 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/filters"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/pkg/randutil"
 	"github.com/sirupsen/logrus"
 
 	"github.com/opencontainers/go-digest"
@@ -295,10 +295,9 @@ func (s *store) ListStatuses(ctx context.Context, fs ...string) ([]content.Statu
 	if err != nil {
 		return nil, err
 	}
-
 	defer fp.Close()
 
-	fis, err := fp.Readdir(-1)
+	fis, err := fp.Readdirnames(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +309,7 @@ func (s *store) ListStatuses(ctx context.Context, fs ...string) ([]content.Statu
 
 	var active []content.Status
 	for _, fi := range fis {
-		p := filepath.Join(s.root, "ingest", fi.Name())
+		p := filepath.Join(s.root, "ingest", fi)
 		stat, err := s.status(p)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -345,16 +344,15 @@ func (s *store) WalkStatusRefs(ctx context.Context, fn func(string) error) error
 	if err != nil {
 		return err
 	}
-
 	defer fp.Close()
 
-	fis, err := fp.Readdir(-1)
+	fis, err := fp.Readdirnames(-1)
 	if err != nil {
 		return err
 	}
 
 	for _, fi := range fis {
-		rf := filepath.Join(s.root, "ingest", fi.Name(), "ref")
+		rf := filepath.Join(s.root, "ingest", fi, "ref")
 
 		ref, err := readFileString(rf)
 		if err != nil {
@@ -473,7 +471,7 @@ func (s *store) Writer(ctx context.Context, opts ...content.WriterOpt) (content.
 			lockErr = nil
 			break
 		}
-		time.Sleep(time.Millisecond * time.Duration(rand.Intn(1<<count)))
+		time.Sleep(time.Millisecond * time.Duration(randutil.Intn(1<<count)))
 	}
 
 	if lockErr != nil {

@@ -21,12 +21,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/containerd/containerd/log"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/containerd"
 	eventtypes "github.com/containerd/containerd/api/events"
-	api "github.com/containerd/containerd/api/services/sandbox/v1"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/oci"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
@@ -42,14 +41,16 @@ import (
 // CRIService interface contains things required by controller, but not yet refactored from criService.
 // TODO: this will be removed in subsequent iterations.
 type CRIService interface {
-	EnsureImageExists(ctx context.Context, ref string, config *runtime.PodSandboxConfig) (*imagestore.Image, error)
-
 	// TODO: we should implement Event backoff in Controller.
 	BackOffEvent(id string, event interface{})
+}
 
-	// TODO: refactor event generator for PLEG.
-	// GenerateAndSendContainerEvent is called by controller for sandbox container events.
-	GenerateAndSendContainerEvent(ctx context.Context, containerID string, sandboxID string, eventType runtime.ContainerEventType)
+// ImageService specifies dependencies to CRI image service.
+type ImageService interface {
+	runtime.ImageServiceServer
+
+	LocalResolve(refOrID string) (imagestore.Image, error)
+	GetImage(id string) (imagestore.Image, error)
 }
 
 type Controller struct {
@@ -57,6 +58,8 @@ type Controller struct {
 	config criconfig.Config
 	// client is an instance of the containerd client
 	client *containerd.Client
+	// imageService is a dependency to CRI image service.
+	imageService ImageService
 	// sandboxStore stores all resources associated with sandboxes.
 	sandboxStore *sandboxstore.Store
 	// os is an interface for all required os operations.
@@ -75,11 +78,13 @@ func New(
 	sandboxStore *sandboxstore.Store,
 	os osinterface.OS,
 	cri CRIService,
+	imageService ImageService,
 	baseOCISpecs map[string]*oci.Spec,
 ) *Controller {
 	return &Controller{
 		config:       config,
 		client:       client,
+		imageService: imageService,
 		sandboxStore: sandboxStore,
 		os:           os,
 		cri:          cri,
@@ -94,17 +99,17 @@ func (c *Controller) Platform(_ctx context.Context, _sandboxID string) (platform
 	return platforms.DefaultSpec(), nil
 }
 
-func (c *Controller) Wait(ctx context.Context, sandboxID string) (*api.ControllerWaitResponse, error) {
+func (c *Controller) Wait(ctx context.Context, sandboxID string) (sandbox.ExitStatus, error) {
 	status := c.store.Get(sandboxID)
 	if status == nil {
-		return nil, fmt.Errorf("failed to get exit channel. %q", sandboxID)
+		return sandbox.ExitStatus{}, fmt.Errorf("failed to get exit channel. %q", sandboxID)
 	}
 
 	exitStatus, exitedAt, err := c.waitSandboxExit(ctx, sandboxID, status.Waiter)
 
-	return &api.ControllerWaitResponse{
+	return sandbox.ExitStatus{
 		ExitStatus: exitStatus,
-		ExitedAt:   protobuf.ToTimestamp(exitedAt),
+		ExitedAt:   exitedAt,
 	}, err
 }
 
@@ -113,11 +118,11 @@ func (c *Controller) waitSandboxExit(ctx context.Context, id string, exitCh <-ch
 	exitedAt = time.Now()
 	select {
 	case exitRes := <-exitCh:
-		logrus.Debugf("received sandbox exit %+v", exitRes)
+		log.G(ctx).Debugf("received sandbox exit %+v", exitRes)
 
 		exitStatus, exitedAt, err = exitRes.Result()
 		if err != nil {
-			logrus.WithError(err).Errorf("failed to get task exit status for %q", id)
+			log.G(ctx).WithError(err).Errorf("failed to get task exit status for %q", id)
 			exitStatus = unknownExitCode
 			exitedAt = time.Now()
 		}
@@ -139,7 +144,7 @@ func (c *Controller) waitSandboxExit(ctx context.Context, id string, exitCh <-ch
 			return nil
 		}()
 		if err != nil {
-			logrus.WithError(err).Errorf("failed to handle sandbox TaskExit %s", id)
+			log.G(ctx).WithError(err).Errorf("failed to handle sandbox TaskExit %s", id)
 			// Don't backoff, the caller is responsible for.
 			return
 		}

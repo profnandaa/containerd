@@ -9,18 +9,18 @@ Users specify the runtime they wish to use when creating a container.
 The runtime can also be changed via a container update.
 
 ```bash
-> ctr run --runtime io.containerd.runc.v1
+> ctr run --runtime io.containerd.runc.v2
 ```
 
-When a user specifies a runtime name, `io.containerd.runc.v1`, they will specify the name and version of the runtime.
+When a user specifies a runtime name, `io.containerd.runc.v2`, they will specify the name and version of the runtime.
 This will be translated by containerd into a binary name for the shim.
 
-`io.containerd.runc.v1` -> `containerd-shim-runc-v1`
+`io.containerd.runc.v2` -> `containerd-shim-runc-v2`
 
 Since 1.6 release, it's also possible to specify absolute runtime path:
 
 ```bash
-> ctr run --runtime /usr/local/bin/containerd-shim-runc-v1
+> ctr run --runtime /usr/local/bin/containerd-shim-runc-v2
 ```
 
 containerd keeps the `containerd-shim-*` prefix so that users can `ps aux | grep containerd-shim` to see running shims on their system.
@@ -42,13 +42,32 @@ This command will launch new shims.
 The start command MUST accept the following flags:
 
 * `-namespace` the namespace for the container
-* `-address` the address of the containerd's main socket
+* `-address` the address of the containerd's main grpc socket
 * `-publish-binary` the binary path to publish events back to containerd
 * `-id` the id of the container
 
 The start command, as well as all binary calls to the shim, has the bundle for the container set as the `cwd`.
 
-The start command MUST return an address to a shim for containerd to issue API requests for container operations.
+The start command may have the following containerd specific environment variables set:
+
+* `TTRPC_ADDRESS` the address of containerd's ttrpc API socket
+* `GRPC_ADDRESS` the address of containerd's grpc API socket (1.7+)
+* `MAX_SHIM_VERSION` the maximum shim version supported by the client, always `2` for shim v2 (1.7+)
+* `SCHED_CORE` enable core scheduling if available (1.6+)
+* `NAMESPACE` an optional namespace the shim is operating in or inheriting (1.7+)
+
+The start command MUST write to stdout either the ttrpc address that the shim is serving its API on, or _(experimental)_
+a JSON structure in the following format (where protocol can be either "ttrpc" or "grpc"):
+
+```json
+{
+	"version": 2,
+	"address": "/address/of/task/service",
+	"protocol": "grpc"
+}
+```
+
+The address will be used by containerd to issue API requests for container operations.
 
 The start command can either start a new shim or return an address to an existing shim based on the shim's logic.
 
@@ -199,7 +218,7 @@ sequenceDiagram
 
     %% Start shim
     containerd-->shim: Prepare bundle
-    containerd->>shim: Execute binary: containerd-shim-runc-v1 start
+    containerd->>shim: Execute binary: containerd-shim-runc-v2 start
     shim->shim: Start TTRPC server
     shim-->>containerd: Respond with address: unix://containerd/container.sock
 
@@ -257,7 +276,7 @@ sequenceDiagram
     shim-->>containerd: OK
 
     containerd-->shim: Close client
-    containerd->>shim: Execute binary: containerd-shim-runc-v1 delete
+    containerd->>shim: Execute binary: containerd-shim-runc-v2 delete
     containerd-->shim: Delete bundle
 
     containerd-->>ctr: Exit code
@@ -337,8 +356,8 @@ Messages will automatically be output in the containerd's daemon logs with the c
 
 #### ttrpc
 
-[ttrpc](https://github.com/containerd/ttrpc) is the only currently supported protocol for shims.
+[ttrpc](https://github.com/containerd/ttrpc) is one of the supported protocols for shims.
 It works with standard protobufs and GRPC services as well as generating clients.
 The only difference between grpc and ttrpc is the wire protocol.
 ttrpc removes the http stack in order to save memory and binary size to keep shims small.
-It is recommended to use ttrpc in your shim but grpc support is also in development.
+It is recommended to use ttrpc in your shim but grpc support is currently an experimental feature.

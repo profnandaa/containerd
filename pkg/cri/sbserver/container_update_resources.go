@@ -23,7 +23,7 @@ import (
 	gocontext "context"
 	"fmt"
 
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
@@ -42,6 +42,21 @@ func (c *criService) UpdateContainerResources(ctx context.Context, r *runtime.Up
 	if err != nil {
 		return nil, fmt.Errorf("failed to find container: %w", err)
 	}
+
+	sandbox, err := c.sandboxStore.Get(container.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+
+	resources := r.GetLinux()
+	updated, err := c.nri.UpdateContainerResources(ctx, &sandbox, &container, resources)
+	if err != nil {
+		return nil, fmt.Errorf("NRI container update failed: %w", err)
+	}
+	if updated != nil {
+		*resources = *updated
+	}
+
 	// Update resources in status update transaction, so that:
 	// 1) There won't be race condition with container start.
 	// 2) There won't be concurrent resource update to the same container.
@@ -50,6 +65,12 @@ func (c *criService) UpdateContainerResources(ctx context.Context, r *runtime.Up
 	}); err != nil {
 		return nil, fmt.Errorf("failed to update resources: %w", err)
 	}
+
+	err = c.nri.PostUpdateContainerResources(ctx, &sandbox, &container)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("NRI post-update notification failed")
+	}
+
 	return &runtime.UpdateContainerResourcesResponse{}, nil
 }
 
@@ -122,12 +143,12 @@ func (c *criService) updateContainerResources(ctx context.Context,
 
 // updateContainerSpec updates container spec.
 func updateContainerSpec(ctx context.Context, cntr containerd.Container, spec *runtimespec.Spec) error {
-	any, err := typeurl.MarshalAny(spec)
+	s, err := typeurl.MarshalAny(spec)
 	if err != nil {
 		return fmt.Errorf("failed to marshal spec %+v: %w", spec, err)
 	}
 	if err := cntr.Update(ctx, func(ctx gocontext.Context, client *containerd.Client, c *containers.Container) error {
-		c.Spec = any
+		c.Spec = s
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to update container spec: %w", err)

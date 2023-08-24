@@ -23,34 +23,35 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/cmd/ctr/commands"
-	"github.com/sirupsen/logrus"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/log"
 	"github.com/urfave/cli"
 )
 
 var startCommand = cli.Command{
 	Name:      "start",
-	Usage:     "start a container that has been created",
+	Usage:     "Start a container that has been created",
 	ArgsUsage: "CONTAINER",
 	Flags: append(platformStartFlags, []cli.Flag{
 		cli.BoolFlag{
 			Name:  "null-io",
-			Usage: "send all IO to /dev/null",
+			Usage: "Send all IO to /dev/null",
 		},
 		cli.StringFlag{
 			Name:  "log-uri",
-			Usage: "log uri",
+			Usage: "Log uri",
 		},
 		cli.StringFlag{
 			Name:  "fifo-dir",
-			Usage: "directory used for storing IO FIFOs",
+			Usage: "Directory used for storing IO FIFOs",
 		},
 		cli.StringFlag{
 			Name:  "pid-file",
-			Usage: "file path to write the task's pid",
+			Usage: "File path to write the task's pid",
 		},
 		cli.BoolFlag{
 			Name:  "detach,d",
-			Usage: "detach from the task after it has started execution",
+			Usage: "Detach from the task after it has started execution",
 		},
 	}...),
 	Action: func(context *cli.Context) error {
@@ -78,7 +79,7 @@ var startCommand = cli.Command{
 		}
 		var (
 			tty    = spec.Process.Terminal
-			opts   = getNewTaskOpts(context)
+			opts   = GetNewTaskOpts(context)
 			ioOpts = []cio.Opt{cio.WithFIFODir(context.String("fifo-dir"))}
 		)
 		var con console.Console
@@ -96,7 +97,12 @@ var startCommand = cli.Command{
 		}
 		var statusC <-chan containerd.ExitStatus
 		if !detach {
-			defer task.Delete(ctx)
+			defer func() {
+				if _, err := task.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+					log.L.WithError(err).Error("failed to cleanup task")
+				}
+			}()
+
 			if statusC, err = task.Wait(ctx); err != nil {
 				return err
 			}
@@ -115,7 +121,7 @@ var startCommand = cli.Command{
 		}
 		if tty {
 			if err := HandleConsoleResize(ctx, task, con); err != nil {
-				logrus.WithError(err).Error("console resize")
+				log.L.WithError(err).Error("console resize")
 			}
 		} else {
 			sigc := commands.ForwardAllSignals(ctx, task)

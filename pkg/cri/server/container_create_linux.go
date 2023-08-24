@@ -36,6 +36,7 @@ import (
 	"github.com/opencontainers/selinux/go-selinux/label"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
+	"github.com/containerd/containerd/pkg/blockio"
 	"github.com/containerd/containerd/pkg/cri/annotations"
 	"github.com/containerd/containerd/pkg/cri/config"
 	customopts "github.com/containerd/containerd/pkg/cri/opts"
@@ -270,7 +271,7 @@ func (c *criService) containerSpec(
 		return nil, fmt.Errorf("failed to set blockio class: %w", err)
 	}
 	if blockIOClass != "" {
-		if linuxBlockIO, err := blockIOToLinuxOci(blockIOClass); err == nil {
+		if linuxBlockIO, err := blockio.ClassNameToLinuxOCI(blockIOClass); err == nil {
 			specOpts = append(specOpts, oci.WithBlockIO(linuxBlockIO))
 		} else {
 			return nil, err
@@ -326,13 +327,9 @@ func (c *criService) containerSpec(
 		customopts.WithOOMScoreAdj(config, c.config.RestrictOOMScoreAdj),
 		customopts.WithPodNamespaces(securityContext, sandboxPid, targetPid, uids, gids),
 		customopts.WithSupplementalGroups(supplementalGroups),
-		customopts.WithAnnotation(annotations.ContainerType, annotations.ContainerTypeContainer),
-		customopts.WithAnnotation(annotations.SandboxID, sandboxID),
-		customopts.WithAnnotation(annotations.SandboxNamespace, sandboxConfig.GetMetadata().GetNamespace()),
-		customopts.WithAnnotation(annotations.SandboxUID, sandboxConfig.GetMetadata().GetUid()),
-		customopts.WithAnnotation(annotations.SandboxName, sandboxConfig.GetMetadata().GetName()),
-		customopts.WithAnnotation(annotations.ContainerName, containerName),
-		customopts.WithAnnotation(annotations.ImageName, imageName),
+	)
+	specOpts = append(specOpts,
+		annotations.DefaultCRIAnnotations(sandboxID, containerName, imageName, sandboxConfig, false)...,
 	)
 	// cgroupns is used for hiding /sys/fs/cgroup from containers.
 	// For compatibility, cgroupns is not used when running in cgroup v1 mode or in privileged.
@@ -369,14 +366,16 @@ func (c *criService) containerSpecOpts(config *runtime.ContainerConfig, imageCon
 		specOpts = append(specOpts, oci.WithUser(userstr))
 	}
 
+	userstr = "0" // runtime default
 	if securityContext.GetRunAsUsername() != "" {
 		userstr = securityContext.GetRunAsUsername()
-	} else {
-		// Even if RunAsUser is not set, we still call `GetValue` to get uid 0.
-		// Because it is still useful to get additional gids for uid 0.
+	} else if securityContext.GetRunAsUser() != nil {
 		userstr = strconv.FormatInt(securityContext.GetRunAsUser().GetValue(), 10)
+	} else if imageConfig.User != "" {
+		userstr, _, _ = strings.Cut(imageConfig.User, ":")
 	}
-	specOpts = append(specOpts, customopts.WithAdditionalGIDs(userstr))
+	specOpts = append(specOpts, customopts.WithAdditionalGIDs(userstr),
+		customopts.WithSupplementalGroups(securityContext.GetSupplementalGroups()))
 
 	asp := securityContext.GetApparmor()
 	if asp == nil {
@@ -416,7 +415,7 @@ func (c *criService) containerSpecOpts(config *runtime.ContainerConfig, imageCon
 		specOpts = append(specOpts, seccompSpecOpts)
 	}
 	if c.config.EnableCDI {
-		specOpts = append(specOpts, customopts.WithCDI(config.Annotations))
+		specOpts = append(specOpts, customopts.WithCDI(config.Annotations, config.CDIDevices))
 	}
 	return specOpts, nil
 }

@@ -23,10 +23,10 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cmd/ctr/commands"
+	"github.com/containerd/containerd/log"
 	gocni "github.com/containerd/go-cni"
-	"github.com/containerd/typeurl"
+	"github.com/containerd/typeurl/v2"
 	"github.com/moby/sys/signal"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -54,7 +54,7 @@ func RemoveCniNetworkIfExist(ctx context.Context, container containerd.Container
 			return err
 		}
 		if err := network.Remove(ctx, commands.FullID(ctx, container), ""); err != nil {
-			logrus.WithError(err).Error("network remove error")
+			log.L.WithError(err).Error("network remove error")
 			return err
 		}
 	}
@@ -63,21 +63,21 @@ func RemoveCniNetworkIfExist(ctx context.Context, container containerd.Container
 
 var killCommand = cli.Command{
 	Name:      "kill",
-	Usage:     "signal a container (default: SIGTERM)",
+	Usage:     "Signal a container (default: SIGTERM)",
 	ArgsUsage: "[flags] CONTAINER",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "signal, s",
 			Value: "",
-			Usage: "signal to send to the container",
+			Usage: "Signal to send to the container",
 		},
 		cli.StringFlag{
 			Name:  "exec-id",
-			Usage: "process ID to kill",
+			Usage: "Process ID to kill",
 		},
 		cli.BoolFlag{
 			Name:  "all, a",
-			Usage: "send signal to all processes inside the container",
+			Usage: "Send signal to all processes inside the container",
 		},
 	},
 	Action: func(context *cli.Context) error {

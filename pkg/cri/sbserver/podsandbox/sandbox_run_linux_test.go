@@ -91,6 +91,14 @@ func getRunPodSandboxTestData() (*runtime.PodSandboxConfig, *imagespec.ImageConf
 			assert.NotEqual(t, "", spec.Process.SelinuxLabel)
 			assert.NotEqual(t, "", spec.Linux.MountLabel)
 		}
+
+		assert.Contains(t, spec.Mounts, runtimespec.Mount{
+			Source:      "/test/root/sandboxes/test-id/resolv.conf",
+			Destination: resolvConfPath,
+			Type:        "bind",
+			Options:     []string{"rbind", "ro", "nosuid", "nodev", "noexec"},
+		})
+
 	}
 	return config, imageConfig, specCheck
 }
@@ -98,12 +106,25 @@ func getRunPodSandboxTestData() (*runtime.PodSandboxConfig, *imagespec.ImageConf
 func TestLinuxSandboxContainerSpec(t *testing.T) {
 	testID := "test-id"
 	nsPath := "test-cni"
-	for desc, test := range map[string]struct {
+	idMap := runtime.IDMapping{
+		HostId:      1000,
+		ContainerId: 1000,
+		Length:      10,
+	}
+	expIDMap := runtimespec.LinuxIDMapping{
+		HostID:      1000,
+		ContainerID: 1000,
+		Size:        10,
+	}
+
+	for _, test := range []struct {
+		desc         string
 		configChange func(*runtime.PodSandboxConfig)
 		specCheck    func(*testing.T, *runtimespec.Spec)
 		expectErr    bool
 	}{
-		"spec should reflect original config": {
+		{
+			desc: "spec should reflect original config",
 			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
 				// runtime spec should have expected namespaces enabled by default.
 				require.NotNil(t, spec.Linux)
@@ -124,7 +145,29 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 				assert.Contains(t, spec.Linux.Sysctl["net.ipv4.ping_group_range"], "0 2147483647")
 			},
 		},
-		"host namespace": {
+		{
+			desc: "spec shouldn't have ping_group_range if userns are in use",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_POD,
+							Uids: []*runtime.IDMapping{&idMap},
+							Gids: []*runtime.IDMapping{&idMap},
+						},
+					},
+				}
+			},
+			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
+				require.NotNil(t, spec.Linux)
+				assert.Contains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.UserNamespace,
+				})
+				assert.NotContains(t, spec.Linux.Sysctl["net.ipv4.ping_group_range"], "0 2147483647")
+			},
+		},
+		{
+			desc: "host namespace",
 			configChange: func(c *runtime.PodSandboxConfig) {
 				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
 					NamespaceOptions: &runtime.NamespaceOption{
@@ -153,7 +196,115 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 				assert.NotContains(t, spec.Linux.Sysctl["net.ipv4.ping_group_range"], "0 2147483647")
 			},
 		},
-		"should set supplemental groups correctly": {
+		{
+			desc: "user namespace",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_POD,
+							Uids: []*runtime.IDMapping{&idMap},
+							Gids: []*runtime.IDMapping{&idMap},
+						},
+					},
+				}
+			},
+			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
+				require.NotNil(t, spec.Linux)
+				assert.Contains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.UserNamespace,
+				})
+				require.Equal(t, spec.Linux.UIDMappings, []runtimespec.LinuxIDMapping{expIDMap})
+				require.Equal(t, spec.Linux.GIDMappings, []runtimespec.LinuxIDMapping{expIDMap})
+
+			},
+		},
+		{
+			desc: "user namespace mode node and mappings",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_NODE,
+							Uids: []*runtime.IDMapping{&idMap},
+							Gids: []*runtime.IDMapping{&idMap},
+						},
+					},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			desc: "user namespace with several mappings",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_NODE,
+							Uids: []*runtime.IDMapping{&idMap, &idMap},
+							Gids: []*runtime.IDMapping{&idMap, &idMap},
+						},
+					},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			desc: "user namespace with uneven mappings",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_NODE,
+							Uids: []*runtime.IDMapping{&idMap, &idMap},
+							Gids: []*runtime.IDMapping{&idMap},
+						},
+					},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			desc: "user namespace mode container",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_CONTAINER,
+						},
+					},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			desc: "user namespace mode target",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode_TARGET,
+						},
+					},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			desc: "user namespace unknown mode",
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						UsernsOptions: &runtime.UserNamespace{
+							Mode: runtime.NamespaceMode(100),
+						},
+					},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			desc: "should set supplemental groups correctly",
 			configChange: func(c *runtime.PodSandboxConfig) {
 				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
 					SupplementalGroups: []int64{1111, 2222},
@@ -165,7 +316,8 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 				assert.Contains(t, spec.Process.User.AdditionalGids, uint32(2222))
 			},
 		},
-		"should overwrite default sysctls": {
+		{
+			desc: "should overwrite default sysctls",
 			configChange: func(c *runtime.PodSandboxConfig) {
 				c.Linux.Sysctls = map[string]string{
 					"net.ipv4.ip_unprivileged_port_start": "500",
@@ -178,7 +330,8 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 				assert.Contains(t, spec.Linux.Sysctl["net.ipv4.ping_group_range"], "1 1000")
 			},
 		},
-		"sandbox sizing annotations should be set if LinuxContainerResources were provided": {
+		{
+			desc: "sandbox sizing annotations should be set if LinuxContainerResources were provided",
 			configChange: func(c *runtime.PodSandboxConfig) {
 				c.Linux.Resources = &v1.LinuxContainerResources{
 					CpuPeriod:          100,
@@ -206,7 +359,8 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 				assert.EqualValues(t, "1024", value)
 			},
 		},
-		"sandbox sizing annotations should not be set if LinuxContainerResources were not provided": {
+		{
+			desc: "sandbox sizing annotations should not be set if LinuxContainerResources were not provided",
 			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
 				_, ok := spec.Annotations[annotations.SandboxCPUPeriod]
 				assert.False(t, ok)
@@ -218,7 +372,8 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 				assert.False(t, ok)
 			},
 		},
-		"sandbox sizing annotations are zero if the resources are set to 0": {
+		{
+			desc: "sandbox sizing annotations are zero if the resources are set to 0",
 			configChange: func(c *runtime.PodSandboxConfig) {
 				c.Linux.Resources = &v1.LinuxContainerResources{}
 			},
@@ -238,7 +393,8 @@ func TestLinuxSandboxContainerSpec(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			c := newControllerService()
 			c.config.EnableUnprivilegedICMP = true
 			c.config.EnableUnprivilegedPorts = true
@@ -267,13 +423,15 @@ func TestSetupSandboxFiles(t *testing.T) {
 		testID       = "test-id"
 		realhostname = "test-real-hostname"
 	)
-	for desc, test := range map[string]struct {
+	for _, test := range []struct {
+		desc          string
 		dnsConfig     *runtime.DNSConfig
 		hostname      string
 		ipcMode       runtime.NamespaceMode
 		expectedCalls []ostesting.CalledDetail
 	}{
-		"should check host /dev/shm existence when ipc mode is NODE": {
+		{
+			desc:    "should check host /dev/shm existence when ipc mode is NODE",
 			ipcMode: runtime.NamespaceMode_NODE,
 			expectedCalls: []ostesting.CalledDetail{
 				{
@@ -309,7 +467,8 @@ func TestSetupSandboxFiles(t *testing.T) {
 				},
 			},
 		},
-		"should create new /etc/resolv.conf if DNSOptions is set": {
+		{
+			desc: "should create new /etc/resolv.conf if DNSOptions is set",
 			dnsConfig: &runtime.DNSConfig{
 				Servers:  []string{"8.8.8.8"},
 				Searches: []string{"114.114.114.114"},
@@ -352,7 +511,8 @@ options timeout:1
 				},
 			},
 		},
-		"should create sandbox shm when ipc namespace mode is not NODE": {
+		{
+			desc:    "should create sandbox shm when ipc namespace mode is not NODE",
 			ipcMode: runtime.NamespaceMode_POD,
 			expectedCalls: []ostesting.CalledDetail{
 				{
@@ -395,7 +555,8 @@ options timeout:1
 				},
 			},
 		},
-		"should create /etc/hostname when hostname is set": {
+		{
+			desc:     "should create /etc/hostname when hostname is set",
 			hostname: "test-hostname",
 			ipcMode:  runtime.NamespaceMode_NODE,
 			expectedCalls: []ostesting.CalledDetail{
@@ -430,7 +591,8 @@ options timeout:1
 			},
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			c := newControllerService()
 			c.os.(*ostesting.FakeOS).HostnameFn = func() (string, error) {
 				return realhostname, nil
@@ -461,15 +623,19 @@ options timeout:1
 }
 
 func TestParseDNSOption(t *testing.T) {
-	for desc, test := range map[string]struct {
+	for _, test := range []struct {
+		desc            string
 		servers         []string
 		searches        []string
 		options         []string
 		expectedContent string
 		expectErr       bool
 	}{
-		"empty dns options should return empty content": {},
-		"non-empty dns options should return correct content": {
+		{
+			desc: "empty dns options should return empty content",
+		},
+		{
+			desc:     "non-empty dns options should return correct content",
 			servers:  []string{"8.8.8.8", "server.google.com"},
 			searches: []string{"114.114.114.114"},
 			options:  []string{"timeout:1"},
@@ -479,7 +645,8 @@ nameserver server.google.com
 options timeout:1
 `,
 		},
-		"expanded dns config should return correct content on modern libc (e.g. glibc 2.26 and above)": {
+		{
+			desc:    "expanded dns config should return correct content on modern libc (e.g. glibc 2.26 and above)",
 			servers: []string{"8.8.8.8", "server.google.com"},
 			searches: []string{
 				"server0.google.com",
@@ -498,7 +665,8 @@ options timeout:1
 `,
 		},
 	} {
-		t.Run(desc, func(t *testing.T) {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
 			resolvContent, err := parseDNSOptions(test.servers, test.searches, test.options)
 			if test.expectErr {
 				assert.Error(t, err)
