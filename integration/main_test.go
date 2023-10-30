@@ -43,8 +43,8 @@ import (
 	"github.com/containerd/containerd/pkg/cri/constants"
 	"github.com/containerd/containerd/pkg/cri/server"
 	"github.com/containerd/containerd/pkg/cri/util"
+	"github.com/containerd/log"
 	"github.com/opencontainers/selinux/go-selinux"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	exec "golang.org/x/sys/execabs"
@@ -72,7 +72,7 @@ var containerdBin = flag.String("containerd-bin", "containerd", "The containerd 
 func TestMain(m *testing.M) {
 	flag.Parse()
 	if err := ConnectDaemons(); err != nil {
-		logrus.WithError(err).Fatalf("Failed to connect daemons")
+		log.L.WithError(err).Fatalf("Failed to connect daemons")
 	}
 	os.Exit(m.Run())
 }
@@ -286,6 +286,10 @@ func WithWindowsResources(r *runtime.WindowsContainerResources) ContainerOpts {
 }
 
 func WithVolumeMount(hostPath, containerPath string) ContainerOpts {
+	return WithIDMapVolumeMount(hostPath, containerPath, nil, nil)
+}
+
+func WithIDMapVolumeMount(hostPath, containerPath string, uidMaps, gidMaps []*runtime.IDMapping) ContainerOpts {
 	return func(c *runtime.ContainerConfig) {
 		hostPath, _ = filepath.Abs(hostPath)
 		containerPath, _ = filepath.Abs(containerPath)
@@ -293,6 +297,8 @@ func WithVolumeMount(hostPath, containerPath string) ContainerOpts {
 			HostPath:       hostPath,
 			ContainerPath:  containerPath,
 			SelinuxRelabel: selinux.GetEnabled(),
+			UidMappings:    uidMaps,
+			GidMappings:    gidMaps,
 		}
 		c.Mounts = append(c.Mounts, mount)
 	}

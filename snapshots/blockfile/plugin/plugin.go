@@ -21,6 +21,8 @@ import (
 
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/snapshots/blockfile"
 )
 
@@ -37,11 +39,15 @@ type Config struct {
 
 	// MountOptions are options used for the mount
 	MountOptions []string `toml:"mount_options"`
+
+	// RecreateScratch always recreates the specified `ScratchFile`
+	// on initialization of the plugin instead of using an existing.
+	RecreateScratch bool `toml:"recreate_scratch"`
 }
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type:   plugin.SnapshotPlugin,
+	registry.Register(&plugin.Registration{
+		Type:   plugins.SnapshotPlugin,
 		ID:     "blockfile",
 		Config: &Config{},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
@@ -53,7 +59,7 @@ func init() {
 			}
 
 			var opts []blockfile.Opt
-			root := ic.Root
+			root := ic.Properties[plugins.PropertyRootDir]
 			if len(config.RootPath) != 0 {
 				root = config.RootPath
 			}
@@ -66,6 +72,7 @@ func init() {
 			if len(config.MountOptions) > 0 {
 				opts = append(opts, blockfile.WithMountOptions(config.MountOptions))
 			}
+			opts = append(opts, blockfile.WithRecreateScratch(config.RecreateScratch))
 
 			return blockfile.NewSnapshotter(root, opts...)
 		},

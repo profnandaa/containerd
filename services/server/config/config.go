@@ -14,20 +14,41 @@
    limitations under the License.
 */
 
+// config is the global configuration for containerd
+//
+// Version History
+// 1: Deprecated and removed in containerd 2.0
+// 2: Uses fully qualified plugin names
+// 3: Added support for migration and warning on unknown fields
 package config
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"dario.cat/mergo"
-	"github.com/pelletier/go-toml"
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/log"
 )
+
+// CurrentConfigVersion is the max config version which is supported
+const CurrentConfigVersion = 3
+
+// migrations hold the migration functions for every prior containerd config version
+var migrations = []func(context.Context, *Config) error{
+	nil,       // Version 0 is not defined, treated at version 1
+	v1Migrate, // Version 1 plugins renamed to URI for version 2
+	nil,       // Version 2 has only plugin changes to version 3
+}
 
 // NOTE: Any new map fields added also need to be handled in mergeConfig.
 
@@ -42,6 +63,8 @@ type Config struct {
 	// TempDir is the path to a directory where to place containerd temporary files
 	TempDir string `toml:"temp"`
 	// PluginDir is the directory for dynamic plugins to be stored
+	//
+	// Deprecated: Please use proxy or binary external plugins.
 	PluginDir string `toml:"plugin_dir"`
 	// GRPC configuration settings
 	GRPC GRPCConfig `toml:"grpc"`
@@ -53,12 +76,14 @@ type Config struct {
 	Metrics MetricsConfig `toml:"metrics"`
 	// DisabledPlugins are IDs of plugins to disable. Disabled plugins won't be
 	// initialized and started.
+	// DisabledPlugins must use a fully qualified plugin URI.
 	DisabledPlugins []string `toml:"disabled_plugins"`
 	// RequiredPlugins are IDs of required plugins. Containerd exits if any
 	// required plugin doesn't exist or fails to be initialized or started.
+	// RequiredPlugins must use a fully qualified plugin URI.
 	RequiredPlugins []string `toml:"required_plugins"`
 	// Plugins provides plugin specific configuration for the initialization of a plugin
-	Plugins map[string]toml.Tree `toml:"plugins"`
+	Plugins map[string]interface{} `toml:"plugins"`
 	// OOMScore adjust the containerd's oom score
 	OOMScore int `toml:"oom_score"`
 	// Cgroup specifies cgroup information for the containerd daemon process
@@ -87,40 +112,83 @@ type StreamProcessor struct {
 	Env []string `toml:"env"`
 }
 
-// GetVersion returns the config file's version
-func (c *Config) GetVersion() int {
-	if c.Version == 0 {
-		return 1
+// ValidateVersion validates the config for a v2 file
+func (c *Config) ValidateVersion() error {
+	if c.Version > CurrentConfigVersion {
+		return fmt.Errorf("expected containerd config version equal to or less than `%d`, got `%d`", CurrentConfigVersion, c.Version)
 	}
-	return c.Version
-}
 
-// ValidateV2 validates the config for a v2 file
-func (c *Config) ValidateV2() error {
-	switch version := c.GetVersion(); version {
-	case 1:
-		return errors.New("containerd config version `1` is no longer supported since containerd v2.0, please switch to version `2`, " +
-			"see https://github.com/containerd/containerd/blob/main/docs/PLUGINS.md#version-header")
-	case 2:
-		// NOP
-	default:
-		return fmt.Errorf("expected containerd config version `2`, got `%d`", version)
-	}
 	for _, p := range c.DisabledPlugins {
-		if !strings.HasPrefix(p, "io.containerd.") || len(strings.SplitN(p, ".", 4)) < 4 {
+		if !strings.ContainsAny(p, ".") {
 			return fmt.Errorf("invalid disabled plugin URI %q expect io.containerd.x.vx", p)
 		}
 	}
 	for _, p := range c.RequiredPlugins {
-		if !strings.HasPrefix(p, "io.containerd.") || len(strings.SplitN(p, ".", 4)) < 4 {
+		if !strings.ContainsAny(p, ".") {
 			return fmt.Errorf("invalid required plugin URI %q expect io.containerd.x.vx", p)
 		}
 	}
-	for p := range c.Plugins {
-		if !strings.HasPrefix(p, "io.containerd.") || len(strings.SplitN(p, ".", 4)) < 4 {
-			return fmt.Errorf("invalid plugin key URI %q expect io.containerd.x.vx", p)
+
+	return nil
+}
+
+// MigrateConfig will convert the config to the latest version before using
+func (c *Config) MigrateConfig(ctx context.Context) error {
+	for c.Version < CurrentConfigVersion {
+		if m := migrations[c.Version]; m != nil {
+			if err := m(ctx, c); err != nil {
+				return err
+			}
 		}
+		c.Version++
 	}
+	return nil
+}
+
+func v1Migrate(ctx context.Context, c *Config) error {
+	plugins := make(map[string]interface{}, len(c.Plugins))
+
+	// corePlugins is the list of used plugins before v1 was deprecated
+	corePlugins := map[string]string{
+		"cri":       "io.containerd.grpc.v1.cri",
+		"cgroups":   "io.containerd.monitor.v1.cgroups",
+		"linux":     "io.containerd.runtime.v1.linux",
+		"scheduler": "io.containerd.gc.v1.scheduler",
+		"bolt":      "io.containerd.metadata.v1.bolt",
+		"task":      "io.containerd.runtime.v2.task",
+		"opt":       "io.containerd.internal.v1.opt",
+		"restart":   "io.containerd.internal.v1.restart",
+		"tracing":   "io.containerd.internal.v1.tracing",
+		"otlp":      "io.containerd.tracing.processor.v1.otlp",
+		"aufs":      "io.containerd.snapshotter.v1.aufs",
+		"btrfs":     "io.containerd.snapshotter.v1.btrfs",
+		"devmapper": "io.containerd.snapshotter.v1.devmapper",
+		"native":    "io.containerd.snapshotter.v1.native",
+		"overlayfs": "io.containerd.snapshotter.v1.overlayfs",
+		"zfs":       "io.containerd.snapshotter.v1.zfs",
+	}
+	for plugin, value := range c.Plugins {
+		if !strings.ContainsAny(plugin, ".") {
+			var ambiguous string
+			if full, ok := corePlugins[plugin]; ok {
+				plugin = full
+			} else if strings.HasSuffix(plugin, "-service") {
+				plugin = "io.containerd.service.v1." + plugin
+			} else if plugin == "windows" || plugin == "windows-lcow" {
+				// runtime, differ, and snapshotter plugins do not have configs for v1
+				ambiguous = plugin
+				plugin = "io.containerd.snapshotter.v1." + plugin
+			} else {
+				ambiguous = plugin
+				plugin = "io.containerd.grpc.v1." + plugin
+			}
+			if ambiguous != "" {
+				log.G(ctx).Warnf("Ambiguous %s plugin in v1 config, treating as %s", ambiguous, plugin)
+			}
+		}
+		plugins[plugin] = value
+	}
+	c.Plugins = plugins
 	return nil
 }
 
@@ -167,26 +235,46 @@ type CgroupConfig struct {
 
 // ProxyPlugin provides a proxy plugin configuration
 type ProxyPlugin struct {
-	Type     string `toml:"type"`
-	Address  string `toml:"address"`
-	Platform string `toml:"platform"`
+	Type     string            `toml:"type"`
+	Address  string            `toml:"address"`
+	Platform string            `toml:"platform"`
+	Exports  map[string]string `toml:"exports"`
 }
 
 // Decode unmarshals a plugin specific configuration by plugin id
-func (c *Config) Decode(p *plugin.Registration) (interface{}, error) {
-	id := p.URI()
+func (c *Config) Decode(ctx context.Context, id string, config interface{}) (interface{}, error) {
 	data, ok := c.Plugins[id]
 	if !ok {
-		return p.Config, nil
+		return config, nil
 	}
-	if err := data.Unmarshal(p.Config); err != nil {
+
+	b, err := toml.Marshal(data)
+	if err != nil {
 		return nil, err
 	}
-	return p.Config, nil
+
+	if err := toml.NewDecoder(bytes.NewReader(b)).DisallowUnknownFields().Decode(config); err != nil {
+		var serr *toml.StrictMissingError
+		if errors.As(err, &serr) {
+			for _, derr := range serr.Errors {
+				log.G(ctx).WithFields(log.Fields{
+					"plugin": id,
+					"key":    strings.Join(derr.Key(), " "),
+				}).WithError(err).Warn("Ignoring unknown key in TOML for plugin")
+			}
+			err = toml.Unmarshal(b, config)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+	}
+
+	return config, nil
 }
 
 // LoadConfig loads the containerd server config from the provided path
-func LoadConfig(path string, out *Config) error {
+func LoadConfig(ctx context.Context, path string, out *Config) error {
 	if out == nil {
 		return fmt.Errorf("argument out must not be nil: %w", errdefs.ErrInvalidArgument)
 	}
@@ -204,7 +292,7 @@ func LoadConfig(path string, out *Config) error {
 			continue
 		}
 
-		config, err := loadConfigFile(path)
+		config, err := loadConfigFile(ctx, path)
 		if err != nil {
 			return err
 		}
@@ -228,7 +316,7 @@ func LoadConfig(path string, out *Config) error {
 		out.Imports = append(out.Imports, path)
 	}
 
-	err := out.ValidateV2()
+	err := out.ValidateVersion()
 	if err != nil {
 		return fmt.Errorf("failed to load TOML from %s: %w", path, err)
 	}
@@ -236,16 +324,49 @@ func LoadConfig(path string, out *Config) error {
 }
 
 // loadConfigFile decodes a TOML file at the given path
-func loadConfigFile(path string) (*Config, error) {
+func loadConfigFile(ctx context.Context, path string) (*Config, error) {
 	config := &Config{}
 
-	file, err := toml.LoadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load TOML: %s: %w", path, err)
+		return nil, err
 	}
+	defer f.Close()
 
-	if err := file.Unmarshal(config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal TOML: %w", err)
+	if err := toml.NewDecoder(f).DisallowUnknownFields().Decode(config); err != nil {
+		var serr *toml.StrictMissingError
+		if errors.As(err, &serr) {
+			for _, derr := range serr.Errors {
+				row, col := derr.Position()
+				log.G(ctx).WithFields(log.Fields{
+					"file":   path,
+					"row":    row,
+					"column": col,
+					"key":    strings.Join(derr.Key(), " "),
+				}).WithError(err).Warn("Ignoring unknown key in TOML")
+			}
+
+			// Try decoding again with unknown fields
+			config = &Config{}
+			if _, seekerr := f.Seek(0, io.SeekStart); seekerr != nil {
+				return nil, fmt.Errorf("unable to seek file to start %w: failed to unmarshal TOML with unknown fields: %w", seekerr, err)
+			}
+			err = toml.NewDecoder(f).Decode(config)
+		}
+		if err != nil {
+			var derr *toml.DecodeError
+			if errors.As(err, &derr) {
+				row, column := derr.Position()
+				log.G(ctx).WithFields(log.Fields{
+					"file":   path,
+					"row":    row,
+					"column": column,
+				}).WithError(err).Error("Failure unmarshaling TOML")
+				return nil, fmt.Errorf("failed to unmarshal TOML at row %d column %d: %w", row, column, err)
+			}
+			return nil, fmt.Errorf("failed to unmarshal TOML: %w", err)
+		}
+
 	}
 
 	return config, nil

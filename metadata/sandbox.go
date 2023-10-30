@@ -239,6 +239,9 @@ func (s *sandboxStore) Delete(ctx context.Context, id string) error {
 		}
 
 		if err := buckets.DeleteBucket([]byte(id)); err != nil {
+			if err == bbolt.ErrBucketNotFound {
+				err = errdefs.ErrNotFound
+			}
 			return fmt.Errorf("failed to delete sandbox %q: %w", id, err)
 		}
 
@@ -289,6 +292,10 @@ func (s *sandboxStore) write(parent *bbolt.Bucket, instance *api.Sandbox, overwr
 	}
 
 	if err := boltutil.WriteAny(bucket, bucketKeySpec, instance.Spec); err != nil {
+		return err
+	}
+
+	if err := bucket.Put(bucketKeySandboxer, []byte(instance.Sandboxer)); err != nil {
 		return err
 	}
 
@@ -349,6 +356,12 @@ func (s *sandboxStore) read(parent *bbolt.Bucket, id []byte) (api.Sandbox, error
 	inst.Extensions, err = boltutil.ReadExtensions(bucket)
 	if err != nil {
 		return api.Sandbox{}, err
+	}
+	sandboxer := bucket.Get(bucketKeySandboxer)
+	if sandboxer == nil {
+		inst.Sandboxer = ""
+	} else {
+		inst.Sandboxer = string(sandboxer)
 	}
 
 	return inst, nil

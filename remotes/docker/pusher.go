@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +31,9 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/remotes"
 	remoteserrors "github.com/containerd/containerd/remotes/errors"
+	"github.com/containerd/log"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -102,12 +103,10 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		host       = hosts[0]
 	)
 
-	switch desc.MediaType {
-	case images.MediaTypeDockerSchema2Manifest, images.MediaTypeDockerSchema2ManifestList,
-		ocispec.MediaTypeImageManifest, ocispec.MediaTypeImageIndex:
+	if images.IsManifestType(desc.MediaType) || images.IsIndexType(desc.MediaType) {
 		isManifest = true
 		existCheck = getManifestPath(p.object, desc.Digest)
-	default:
+	} else {
 		existCheck = []string{"blobs", desc.Digest.String()}
 	}
 
@@ -137,6 +136,9 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 			if exists {
 				p.tracker.SetStatus(ref, Status{
 					Committed: true,
+					PushStatus: PushStatus{
+						Exists: true,
+					},
 					Status: content.Status{
 						Ref: ref,
 						// TODO: Set updated time?
@@ -162,6 +164,7 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		// Start upload request
 		req = p.request(host, http.MethodPost, "blobs", "uploads/")
 
+		mountedFrom := ""
 		var resp *http.Response
 		if fromRepo := selectRepositoryMountCandidate(p.refspec, desc.Annotations); fromRepo != "" {
 			preq := requestWithMountFrom(req, desc.Digest.String(), fromRepo)
@@ -178,11 +181,14 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 				return nil, err
 			}
 
-			if resp.StatusCode == http.StatusUnauthorized {
+			switch resp.StatusCode {
+			case http.StatusUnauthorized:
 				log.G(ctx).Debugf("failed to mount from repository %s", fromRepo)
 
 				resp.Body.Close()
 				resp = nil
+			case http.StatusCreated:
+				mountedFrom = path.Join(p.refspec.Hostname(), fromRepo)
 			}
 		}
 
@@ -202,6 +208,9 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		case http.StatusCreated:
 			p.tracker.SetStatus(ref, Status{
 				Committed: true,
+				PushStatus: PushStatus{
+					MountedFrom: mountedFrom,
+				},
 				Status: content.Status{
 					Ref:    ref,
 					Total:  desc.Size,
@@ -236,13 +245,16 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 			}
 
 			if lurl.Host != lhost.Host || lhost.Scheme != lurl.Scheme {
-
 				lhost.Scheme = lurl.Scheme
 				lhost.Host = lurl.Host
-				log.G(ctx).WithField("host", lhost.Host).WithField("scheme", lhost.Scheme).Debug("upload changed destination")
 
-				// Strip authorizer if change to host or scheme
-				lhost.Authorizer = nil
+				// Check if different than what was requested, accounting for fallback in the transport layer
+				requested := resp.Request.URL
+				if requested.Host != lhost.Host || requested.Scheme != lhost.Scheme {
+					// Strip authorizer if change to host or scheme
+					lhost.Authorizer = nil
+					log.G(ctx).WithField("host", lhost.Host).WithField("scheme", lhost.Scheme).Debug("upload changed destination, authorizer removed")
+				}
 			}
 		}
 		q := lurl.Query()

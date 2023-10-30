@@ -4253,6 +4253,19 @@ file {
       type: TYPE_BOOL
       json_name: "sync"
     }
+    field {
+      name: "target"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".containerd.types.Descriptor"
+      oneof_index: 0
+      json_name: "target"
+      proto3_optional: true
+    }
+    oneof_decl {
+      name: "_target"
+    }
   }
   service {
     name: "Images"
@@ -4331,6 +4344,7 @@ file {
   dependency: "github.com/containerd/containerd/api/types/platform.proto"
   dependency: "google/rpc/status.proto"
   dependency: "google/protobuf/empty.proto"
+  dependency: "google/protobuf/timestamp.proto"
   message_type {
     name: "Plugin"
     field {
@@ -4449,6 +4463,39 @@ file {
       label: LABEL_OPTIONAL
       type: TYPE_UINT64
       json_name: "pidns"
+    }
+    field {
+      name: "deprecations"
+      number: 4
+      label: LABEL_REPEATED
+      type: TYPE_MESSAGE
+      type_name: ".containerd.services.introspection.v1.DeprecationWarning"
+      json_name: "deprecations"
+    }
+  }
+  message_type {
+    name: "DeprecationWarning"
+    field {
+      name: "id"
+      number: 1
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "id"
+    }
+    field {
+      name: "message"
+      number: 2
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "message"
+    }
+    field {
+      name: "last_occurrence"
+      number: 3
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".google.protobuf.Timestamp"
+      json_name: "lastOccurrence"
     }
   }
   service {
@@ -4961,6 +5008,13 @@ file {
       type_name: ".containerd.types.Sandbox.ExtensionsEntry"
       json_name: "extensions"
     }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
+    }
     nested_type {
       name: "Runtime"
       field {
@@ -5181,6 +5235,13 @@ file {
       type_name: ".containerd.services.sandbox.v1.ControllerCreateRequest.AnnotationsEntry"
       json_name: "annotations"
     }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
+    }
     nested_type {
       name: "AnnotationsEntry"
       field {
@@ -5220,6 +5281,13 @@ file {
       label: LABEL_OPTIONAL
       type: TYPE_STRING
       json_name: "sandboxId"
+    }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
     }
   }
   message_type {
@@ -5284,6 +5352,13 @@ file {
       type: TYPE_STRING
       json_name: "sandboxId"
     }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
+    }
   }
   message_type {
     name: "ControllerPlatformResponse"
@@ -5312,6 +5387,13 @@ file {
       type: TYPE_UINT32
       json_name: "timeoutSecs"
     }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
+    }
   }
   message_type {
     name: "ControllerStopResponse"
@@ -5324,6 +5406,13 @@ file {
       label: LABEL_OPTIONAL
       type: TYPE_STRING
       json_name: "sandboxId"
+    }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
     }
   }
   message_type {
@@ -5359,6 +5448,13 @@ file {
       label: LABEL_OPTIONAL
       type: TYPE_BOOL
       json_name: "verbose"
+    }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
     }
   }
   message_type {
@@ -5446,6 +5542,13 @@ file {
       type: TYPE_STRING
       json_name: "sandboxId"
     }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
+    }
   }
   message_type {
     name: "ControllerShutdownResponse"
@@ -5458,6 +5561,13 @@ file {
       label: LABEL_OPTIONAL
       type: TYPE_STRING
       json_name: "sandboxId"
+    }
+    field {
+      name: "sandboxer"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_STRING
+      json_name: "sandboxer"
     }
   }
   message_type {

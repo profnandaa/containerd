@@ -19,6 +19,7 @@ package tasks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,19 +36,21 @@ import (
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/filters"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/pkg/blockio"
 	"github.com/containerd/containerd/pkg/rdt"
 	"github.com/containerd/containerd/pkg/timeout"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/protobuf"
 	"github.com/containerd/containerd/protobuf/proto"
 	ptypes "github.com/containerd/containerd/protobuf/types"
 	"github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/runtime/v2/runc/options"
 	"github.com/containerd/containerd/services"
+	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -74,8 +77,8 @@ type Config struct {
 }
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type:     plugin.ServicePlugin,
+	registry.Register(&plugin.Registration{
+		Type:     plugins.ServicePlugin,
 		ID:       services.TasksService,
 		Requires: tasksServiceRequires,
 		Config:   &Config{},
@@ -88,24 +91,24 @@ func init() {
 func initFunc(ic *plugin.InitContext) (interface{}, error) {
 	config := ic.Config.(*Config)
 
-	v2r, err := ic.GetByID(plugin.RuntimePluginV2, "task")
+	v2r, err := ic.GetByID(plugins.RuntimePluginV2, "task")
 	if err != nil {
 		return nil, err
 	}
 
-	m, err := ic.Get(plugin.MetadataPlugin)
+	m, err := ic.Get(plugins.MetadataPlugin)
 	if err != nil {
 		return nil, err
 	}
 
-	ep, err := ic.Get(plugin.EventPlugin)
+	ep, err := ic.Get(plugins.EventPlugin)
 	if err != nil {
 		return nil, err
 	}
 
-	monitor, err := ic.Get(plugin.TaskMonitorPlugin)
+	monitor, err := ic.Get(plugins.TaskMonitorPlugin)
 	if err != nil {
-		if !errdefs.IsNotFound(err) {
+		if !errors.Is(err, plugin.ErrPluginNotFound) {
 			return nil, err
 		}
 		monitor = runtime.NewNoopMonitor()
@@ -311,7 +314,7 @@ func getProcessState(ctx context.Context, p runtime.Process) (*task.Process, err
 
 	state, err := p.State(ctx)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
+		if errdefs.IsNotFound(err) || errdefs.IsUnavailable(err) {
 			return nil, err
 		}
 		log.G(ctx).WithError(err).Errorf("get state for %s", p.ID())

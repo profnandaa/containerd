@@ -26,38 +26,35 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/events/exchange"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/runtime"
 	v2 "github.com/containerd/containerd/runtime/v2"
 	"github.com/containerd/containerd/sandbox"
+	"github.com/containerd/log"
 
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.SandboxControllerPlugin,
-		ID:   "local",
+	registry.Register(&plugin.Registration{
+		Type: plugins.SandboxControllerPlugin,
+		ID:   "shim",
 		Requires: []plugin.Type{
-			plugin.RuntimePluginV2,
-			plugin.EventPlugin,
-			plugin.SandboxStorePlugin,
+			plugins.RuntimePluginV2,
+			plugins.EventPlugin,
+			plugins.SandboxStorePlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			shimPlugin, err := ic.GetByID(plugin.RuntimePluginV2, "shim")
+			shimPlugin, err := ic.GetByID(plugins.RuntimePluginV2, "shim")
 			if err != nil {
 				return nil, err
 			}
 
-			exchangePlugin, err := ic.GetByID(plugin.EventPlugin, "exchange")
-			if err != nil {
-				return nil, err
-			}
-
-			sbPlugin, err := ic.GetByID(plugin.SandboxStorePlugin, "local")
+			exchangePlugin, err := ic.GetByID(plugins.EventPlugin, "exchange")
 			if err != nil {
 				return nil, err
 			}
@@ -65,12 +62,10 @@ func init() {
 			var (
 				shims     = shimPlugin.(*v2.ShimManager)
 				publisher = exchangePlugin.(*exchange.Exchange)
-				store     = sbPlugin.(sandbox.Store)
 			)
 
 			return &controllerLocal{
 				shims:     shims,
-				store:     store,
 				publisher: publisher,
 			}, nil
 		},
@@ -79,7 +74,6 @@ func init() {
 
 type controllerLocal struct {
 	shims     *v2.ShimManager
-	store     sandbox.Store
 	publisher events.Publisher
 }
 
@@ -104,19 +98,15 @@ func (c *controllerLocal) cleanupShim(ctx context.Context, sandboxID string, svc
 	}
 }
 
-func (c *controllerLocal) Create(ctx context.Context, sandboxID string, opts ...sandbox.CreateOpt) error {
+func (c *controllerLocal) Create(ctx context.Context, info sandbox.Sandbox, opts ...sandbox.CreateOpt) error {
 	var coptions sandbox.CreateOptions
+	sandboxID := info.ID
 	for _, opt := range opts {
 		opt(&coptions)
 	}
 
 	if _, err := c.shims.Get(ctx, sandboxID); err == nil {
 		return fmt.Errorf("sandbox %s already running: %w", sandboxID, errdefs.ErrAlreadyExists)
-	}
-
-	info, err := c.store.Get(ctx, sandboxID)
-	if err != nil {
-		return fmt.Errorf("failed to query sandbox metadata from store: %w", err)
 	}
 
 	shim, err := c.shims.Start(ctx, sandboxID, runtime.CreateOpts{
@@ -262,6 +252,12 @@ func (c *controllerLocal) Wait(ctx context.Context, sandboxID string) (sandbox.E
 
 func (c *controllerLocal) Status(ctx context.Context, sandboxID string, verbose bool) (sandbox.ControllerStatus, error) {
 	svc, err := c.getSandbox(ctx, sandboxID)
+	if errdefs.IsNotFound(err) {
+		return sandbox.ControllerStatus{
+			SandboxID: sandboxID,
+			ExitedAt:  time.Now(),
+		}, nil
+	}
 	if err != nil {
 		return sandbox.ControllerStatus{}, err
 	}
@@ -301,7 +297,7 @@ func (c *controllerLocal) Metrics(ctx context.Context, sandboxID string) (*types
 func (c *controllerLocal) getSandbox(ctx context.Context, id string) (runtimeAPI.TTRPCSandboxService, error) {
 	shim, err := c.shims.Get(ctx, id)
 	if err != nil {
-		return nil, errdefs.ErrNotFound
+		return nil, err
 	}
 
 	return sandbox.NewClient(shim.Client())

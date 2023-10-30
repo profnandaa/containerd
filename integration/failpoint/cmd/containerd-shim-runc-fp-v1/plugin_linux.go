@@ -23,11 +23,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	taskapi "github.com/containerd/containerd/api/runtime/task/v2"
+	taskapi "github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/pkg/failpoint"
 	"github.com/containerd/containerd/pkg/shutdown"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/runtime/v2/runc/task"
 	"github.com/containerd/containerd/runtime/v2/shim"
 	"github.com/containerd/ttrpc"
@@ -38,19 +40,19 @@ const (
 )
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.TTRPCPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.TTRPCPlugin,
 		ID:   "task",
 		Requires: []plugin.Type{
-			plugin.EventPlugin,
-			plugin.InternalPlugin,
+			plugins.EventPlugin,
+			plugins.InternalPlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			pp, err := ic.GetByID(plugin.EventPlugin, "publisher")
+			pp, err := ic.GetByID(plugins.EventPlugin, "publisher")
 			if err != nil {
 				return nil, err
 			}
-			ss, err := ic.GetByID(plugin.InternalPlugin, "shutdown")
+			ss, err := ic.GetByID(plugins.InternalPlugin, "shutdown")
 			if err != nil {
 				return nil, err
 			}
@@ -77,11 +79,11 @@ var (
 
 type taskServiceWithFp struct {
 	fps   map[string]*failpoint.Failpoint
-	local taskapi.TaskService
+	local taskapi.TTRPCTaskService
 }
 
 func (s *taskServiceWithFp) RegisterTTRPC(server *ttrpc.Server) error {
-	taskapi.RegisterTaskService(server, s.local)
+	taskapi.RegisterTTRPCTaskService(server, s.local)
 	return nil
 }
 

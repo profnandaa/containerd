@@ -27,8 +27,8 @@ import (
 	"github.com/containerd/containerd"
 	containerdio "github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
+	"github.com/containerd/log"
 	"k8s.io/client-go/tools/remotecommand"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
@@ -146,8 +146,6 @@ func (c *criService) execInternal(ctx context.Context, container containerd.Cont
 	}
 
 	pspec.Args = opts.cmd
-	// CommandLine may already be set on the container's spec, but we want to only use Args here.
-	pspec.CommandLine = ""
 
 	if opts.stdout == nil {
 		opts.stdout = cio.NewDiscardLogger()

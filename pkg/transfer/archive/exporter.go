@@ -28,11 +28,11 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/images/archive"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/streaming"
 	"github.com/containerd/containerd/pkg/transfer/plugins"
 	tstreaming "github.com/containerd/containerd/pkg/transfer/streaming"
 	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
 )
 
 func init() {
@@ -156,7 +156,7 @@ func (iis *ImageExportStream) UnmarshalAny(ctx context.Context, sm streaming.Str
 		return err
 	}
 
-	specified := platforms.FromProto(s.Platforms)
+	specified := types.OCIPlatformFromProto(s.Platforms)
 	iis.stream = tstreaming.WriteByteStream(ctx, stream)
 	iis.mediaType = s.MediaType
 	iis.platforms = specified

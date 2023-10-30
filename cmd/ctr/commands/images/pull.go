@@ -28,12 +28,12 @@ import (
 	"github.com/containerd/containerd/cmd/ctr/commands"
 	"github.com/containerd/containerd/cmd/ctr/commands/content"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/progress"
 	"github.com/containerd/containerd/pkg/transfer"
 	"github.com/containerd/containerd/pkg/transfer/image"
 	"github.com/containerd/containerd/pkg/transfer/registry"
 	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/urfave/cli"
@@ -63,8 +63,13 @@ command. As part of this process, we do the following:
 			Usage: "Pull content and metadata from all platforms",
 		},
 		cli.BoolFlag{
-			Name:  "all-metadata",
-			Usage: "Pull metadata for all platforms",
+			Name:   "all-metadata",
+			Usage:  "(Deprecated: use skip-metadata) Pull metadata for all platforms",
+			Hidden: true,
+		},
+		cli.BoolFlag{
+			Name:  "skip-metadata",
+			Usage: "Skips metadata for unused platforms (Image may be unable to be pushed without metadata)",
 		},
 		cli.BoolFlag{
 			Name:  "print-chainid",
@@ -123,7 +128,7 @@ command. As part of this process, we do the following:
 				// Any with an empty set is None
 				// TODO: Specify way to specify not default platform
 				// config.PlatformMatcher = platforms.Any()
-			} else if context.Bool("all-metadata") {
+			} else if !context.Bool("skip-metadata") {
 				sopts = append(sopts, image.WithAllMetadata)
 			}
 

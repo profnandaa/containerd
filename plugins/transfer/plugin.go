@@ -23,12 +23,15 @@ import (
 	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/metadata"
+	"github.com/containerd/containerd/pkg/imageverifier"
 	"github.com/containerd/containerd/pkg/transfer/local"
 	"github.com/containerd/containerd/pkg/unpack"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
+	"github.com/containerd/log"
 
 	// Load packages with type registrations
 	_ "github.com/containerd/containerd/pkg/transfer/archive"
@@ -38,25 +41,40 @@ import (
 
 // Register local transfer service plugin
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.TransferPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.TransferPlugin,
 		ID:   "local",
 		Requires: []plugin.Type{
-			plugin.LeasePlugin,
-			plugin.MetadataPlugin,
-			plugin.DiffPlugin,
+			plugins.LeasePlugin,
+			plugins.MetadataPlugin,
+			plugins.DiffPlugin,
+			plugins.ImageVerifierPlugin,
 		},
 		Config: defaultConfig(),
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 			config := ic.Config.(*transferConfig)
-			m, err := ic.Get(plugin.MetadataPlugin)
+			m, err := ic.Get(plugins.MetadataPlugin)
 			if err != nil {
 				return nil, err
 			}
 			ms := m.(*metadata.DB)
-			l, err := ic.Get(plugin.LeasePlugin)
+			l, err := ic.Get(plugins.LeasePlugin)
 			if err != nil {
 				return nil, err
+			}
+
+			vfs := make(map[string]imageverifier.ImageVerifier)
+			vps, err := ic.GetByType(plugins.ImageVerifierPlugin)
+			if err != nil {
+				return nil, err
+			}
+
+			for name, vp := range vps {
+				inst, err := vp.Instance()
+				if err != nil {
+					return nil, err
+				}
+				vfs[name] = inst.(imageverifier.ImageVerifier)
 			}
 
 			// Set configuration based on default or user input
@@ -66,7 +84,7 @@ func init() {
 			for _, uc := range config.UnpackConfiguration {
 				p, err := platforms.Parse(uc.Platform)
 				if err != nil {
-					return nil, fmt.Errorf("%s: platform configuration %v invalid", plugin.TransferPlugin, uc.Platform)
+					return nil, fmt.Errorf("%s: platform configuration %v invalid", plugins.TransferPlugin, uc.Platform)
 				}
 
 				sn := ms.Snapshotter(uc.Snapshotter)
@@ -74,7 +92,7 @@ func init() {
 					return nil, fmt.Errorf("snapshotter %q not found: %w", uc.Snapshotter, errdefs.ErrNotFound)
 				}
 
-				diffPlugins, err := ic.GetByType(plugin.DiffPlugin)
+				diffPlugins, err := ic.GetByType(plugins.DiffPlugin)
 				if err != nil {
 					return nil, fmt.Errorf("error loading diff plugins: %w", err)
 				}
@@ -126,7 +144,7 @@ func init() {
 			}
 			lc.RegistryConfigPath = config.RegistryConfigPath
 
-			return local.NewTransferService(l.(leases.Manager), ms.ContentStore(), metadata.NewImageStore(ms), &lc), nil
+			return local.NewTransferService(l.(leases.Manager), ms.ContentStore(), metadata.NewImageStore(ms), vfs, &lc), nil
 		},
 	})
 }

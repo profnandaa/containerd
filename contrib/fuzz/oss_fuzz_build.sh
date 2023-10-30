@@ -43,11 +43,11 @@ go run main.go $SRC/containerd/images
 
 apt-get update && apt-get install -y wget
 cd $SRC
-wget --quiet https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
+wget --quiet https://go.dev/dl/go1.21.3.linux-amd64.tar.gz
 
 mkdir temp-go
 rm -rf /root/.go/*
-tar -C temp-go/ -xzf go1.21.0.linux-amd64.tar.gz
+tar -C temp-go/ -xzf go1.21.3.linux-amd64.tar.gz
 mv temp-go/go/* /root/.go/
 cd $SRC/containerd
 
@@ -57,6 +57,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 cd ../../
 
 rm -r vendor
+
+# Add temporary CXXFLAGS
+OLDCXXFLAGS=$CXXFLAGS
+export CXXFLAGS="$CXXFLAGS -lresolv"
 
 # Change path of socket since OSS-fuzz does not grant access to /run
 sed -i 's/\/run\/containerd/\/tmp\/containerd/g' $SRC/containerd/defaults/defaults_unix.go
@@ -95,3 +99,6 @@ compile_fuzzers '^func FuzzInteg.*data' compile_go_fuzzer vendor
 
 cp $SRC/containerd/contrib/fuzz/*.options $OUT/
 cp $SRC/containerd/contrib/fuzz/*.dict $OUT/
+
+# Resume CXXFLAGS
+export CXXFLAGS=$OLDCXXFLAGS

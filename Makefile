@@ -129,7 +129,7 @@ endif
 GOPATHS=$(shell $(GO) env GOPATH | tr ":" "\n" | tr ";" "\n")
 
 TESTFLAGS_RACE=
-GO_BUILD_FLAGS=
+GO_BUILD_FLAGS ?=
 # See Golang issue re: '-trimpath': https://github.com/golang/go/issues/13809
 GO_GCFLAGS=$(shell				\
 	set -- ${GOPATHS};			\
@@ -235,6 +235,11 @@ bin/containerd-shim-runc-fp-v1: integration/failpoint/cmd/containerd-shim-runc-f
 bin/cni-bridge-fp: integration/failpoint/cmd/cni-bridge-fp FORCE
 	@echo "$(WHALE) $@"
 	@$(GO) build ${GO_BUILD_FLAGS} -o $@ ./integration/failpoint/cmd/cni-bridge-fp
+
+# build runc-fp as runc wrapper to support failpoint, only used by integration test
+bin/runc-fp: integration/failpoint/cmd/runc-fp FORCE
+	@echo "$(WHALE) $@"
+	@$(GO) build ${GO_BUILD_FLAGS} -o $@ ./integration/failpoint/cmd/runc-fp
 
 benchmark: ## run benchmarks tests
 	@echo "$(WHALE) $@"
@@ -380,11 +385,11 @@ releases/$(CRICNIRELEASE).tar.gz: install-cri-deps $(CRIDIR)/cri-containerd.DEPR
 	@tar -czf releases/$(CRICNIRELEASE).tar.gz -C $(CRIDIR) cri-containerd.DEPRECATED.txt etc usr opt
 endif
 
-cri-release: releases/$(CRIRELEASE).tar.gz
+cri-release: releases/$(CRIRELEASE).tar.gz ## Deprecated (only kept for external CI)
 	@echo "$(WHALE) $@"
 	@cd releases && sha256sum $(CRIRELEASE).tar.gz >$(CRIRELEASE).tar.gz.sha256sum && ln -sf $(CRIRELEASE).tar.gz cri-containerd.tar.gz
 
-cri-cni-release: releases/$(CRICNIRELEASE).tar.gz
+cri-cni-release: releases/$(CRICNIRELEASE).tar.gz ## Deprecated (only kept for external CI)
 	@echo "$(WHALE) $@"
 	@cd releases && sha256sum $(CRICNIRELEASE).tar.gz >$(CRICNIRELEASE).tar.gz.sha256sum && ln -sf $(CRICNIRELEASE).tar.gz cri-cni-containerd.tar.gz
 

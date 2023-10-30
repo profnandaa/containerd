@@ -23,7 +23,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 )
 
 type SandboxControllerMode string
@@ -53,9 +53,6 @@ type Runtime struct {
 	// Currently, only device plugins populate the annotations.
 	ContainerAnnotations []string `toml:"container_annotations" json:"ContainerAnnotations"`
 	// Options are config options for the runtime.
-	// If options is loaded from toml config, it will be map[string]interface{}.
-	// Options can be converted into toml.Tree using toml.TreeFromMap().
-	// Using options type as map[string]interface{} helps in correctly marshaling options from Go to JSON.
 	Options map[string]interface{} `toml:"options" json:"options"`
 	// PrivilegedWithoutHostDevices overloads the default behaviour for adding host devices to the
 	// runtime spec when the container is privileged. Defaults to false.
@@ -77,11 +74,11 @@ type Runtime struct {
 	// while using default snapshotters for operational simplicity.
 	// See https://github.com/containerd/containerd/issues/6657 for details.
 	Snapshotter string `toml:"snapshotter" json:"snapshotter"`
-	// SandboxMode defines which sandbox runtime to use when scheduling pods
+	// Sandboxer defines which sandbox runtime to use when scheduling pods
 	// This features requires the new CRI server implementation (enabled by default in 2.0)
 	// shim - means use whatever Controller implementation provided by shim (e.g. use RemoteController).
 	// podsandbox - means use Controller implementation from sbserver podsandbox package.
-	SandboxMode string `toml:"sandbox_mode" json:"sandboxMode"`
+	Sandboxer string `toml:"sandboxer" json:"sandboxer"`
 }
 
 // ContainerdConfig contains toml config related to containerd
@@ -386,8 +383,8 @@ func ValidatePluginConfig(ctx context.Context, c *PluginConfig) error {
 			return errors.New("`privileged_without_host_devices_all_devices_allowed` requires `privileged_without_host_devices` to be enabled")
 		}
 		// If empty, use default podSandbox mode
-		if len(r.SandboxMode) == 0 {
-			r.SandboxMode = string(ModePodSandbox)
+		if len(r.Sandboxer) == 0 {
+			r.Sandboxer = string(ModePodSandbox)
 			c.ContainerdConfig.Runtimes[k] = r
 		}
 	}

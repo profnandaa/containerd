@@ -36,12 +36,12 @@ import (
 	"github.com/containerd/containerd/contrib/apparmor"
 	"github.com/containerd/containerd/contrib/nvidia"
 	"github.com/containerd/containerd/contrib/seccomp"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
 	runtimeoptions "github.com/containerd/containerd/pkg/runtimeoptions/v1"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/runtime/v2/runc/options"
 	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/log"
 	"github.com/intel/goresctrl/pkg/blockio"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli"
@@ -186,8 +186,9 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 				opts = append(opts,
 					oci.WithUserNamespace([]specs.LinuxIDMapping{uidMap}, []specs.LinuxIDMapping{gidMap}))
 				// use snapshotter opts or the remapped snapshot support to shift the filesystem
-				// currently the only snapshotter known to support the labels is fuse-overlayfs:
-				// https://github.com/AkihiroSuda/containerd-fuse-overlayfs
+				// currently the snapshotters known to support the labels are:
+				// fuse-overlayfs - https://github.com/containerd/fuse-overlayfs-snapshotter
+				// overlay - in case of idmapped mount points are supported by host kernel (Linux kernel 5.19)
 				if context.Bool("remap-labels") {
 					cOpts = append(cOpts, containerd.WithNewSnapshot(id, image,
 						containerd.WithRemapperLabels(0, uidMap.HostID, 0, gidMap.HostID, uidMap.Size)))
@@ -324,6 +325,10 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 				return nil, errors.New("cpus and quota/period should be used separately")
 			}
 			opts = append(opts, oci.WithCPUCFS(quota, period))
+		}
+
+		if burst := context.Uint64("cpu-burst"); burst != 0 {
+			opts = append(opts, oci.WithCPUBurst(burst))
 		}
 
 		joinNs := context.StringSlice("with-ns")

@@ -29,6 +29,7 @@ import (
 
 	"github.com/containerd/containerd/sys/reaper"
 	"github.com/containerd/fifo"
+	"github.com/containerd/log"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -66,7 +67,7 @@ func serveListener(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	logrus.WithField("socket", path).Debug("serving api on socket")
+	log.L.WithField("socket", path).Debug("serving api on socket")
 	return l, nil
 }
 

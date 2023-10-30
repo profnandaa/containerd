@@ -18,6 +18,7 @@ package shim
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,15 +30,17 @@ import (
 	"runtime/debug"
 	"time"
 
-	shimapi "github.com/containerd/containerd/api/runtime/task/v2"
+	shimapi "github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/events"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/shutdown"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/protobuf"
 	"github.com/containerd/containerd/protobuf/proto"
 	"github.com/containerd/containerd/version"
+	"github.com/containerd/log"
 	"github.com/containerd/ttrpc"
 	"github.com/sirupsen/logrus"
 )
@@ -74,7 +77,7 @@ type StopStatus struct {
 // Manager is the interface which manages the shim process
 type Manager interface {
 	Name() string
-	Start(ctx context.Context, id string, opts StartOpts) (string, error)
+	Start(ctx context.Context, id string, opts StartOpts) (BootstrapParams, error)
 	Stop(ctx context.Context, id string) (StopStatus, error)
 }
 
@@ -167,7 +170,7 @@ func setLogger(ctx context.Context, id string) (context.Context, error) {
 		FullTimestamp:   true,
 	})
 	if debugFlag {
-		l.Logger.SetLevel(logrus.DebugLevel)
+		l.Logger.SetLevel(log.DebugLevel)
 	}
 	f, err := openLog(ctx, id)
 	if err != nil {
@@ -235,13 +238,13 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 	// Handle explicit actions
 	switch action {
 	case "delete":
-		if debugFlag {
-			logrus.SetLevel(logrus.DebugLevel)
-		}
 		logger := log.G(ctx).WithFields(log.Fields{
 			"pid":       os.Getpid(),
 			"namespace": namespaceFlag,
 		})
+		if debugFlag {
+			logger.Logger.SetLevel(log.DebugLevel)
+		}
 		go reap(ctx, logger, signals)
 		ss, err := manager.Stop(ctx, id)
 		if err != nil {
@@ -266,13 +269,20 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 			Debug:        debugFlag,
 		}
 
-		address, err := manager.Start(ctx, id, opts)
+		params, err := manager.Start(ctx, id, opts)
 		if err != nil {
 			return err
 		}
-		if _, err := os.Stdout.WriteString(address); err != nil {
+
+		data, err := json.Marshal(&params)
+		if err != nil {
+			return fmt.Errorf("failed to marshal bootstrap params to json: %w", err)
+		}
+
+		if _, err := os.Stdout.Write(data); err != nil {
 			return err
 		}
+
 		return nil
 	}
 
@@ -283,8 +293,8 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 		}
 	}
 
-	plugin.Register(&plugin.Registration{
-		Type: plugin.InternalPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.InternalPlugin,
 		ID:   "shutdown",
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 			return sd, nil
@@ -292,8 +302,8 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 	})
 
 	// Register event plugin
-	plugin.Register(&plugin.Registration{
-		Type: plugin.EventPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.EventPlugin,
 		ID:   "publisher",
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
 			return publisher, nil
@@ -306,24 +316,24 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 
 		ttrpcUnaryInterceptors = []ttrpc.UnaryServerInterceptor{}
 	)
-	plugins := plugin.Graph(func(*plugin.Registration) bool { return false })
-	for _, p := range plugins {
+
+	for _, p := range registry.Graph(func(*plugin.Registration) bool { return false }) {
 		id := p.URI()
 		log.G(ctx).WithField("type", p.Type).Infof("loading plugin %q...", id)
 
 		initContext := plugin.NewContext(
 			ctx,
-			p,
 			initialized,
-			// NOTE: Root is empty since the shim does not support persistent storage,
-			// shim plugins should make use state directory for writing files to disk.
-			// The state directory will be destroyed when the shim if cleaned up or
-			// on reboot
-			"",
-			bundlePath,
+			map[string]string{
+				// NOTE: Root is empty since the shim does not support persistent storage,
+				// shim plugins should make use state directory for writing files to disk.
+				// The state directory will be destroyed when the shim if cleaned up or
+				// on reboot
+				plugins.PropertyStateDir:     filepath.Join(bundlePath, p.URI()),
+				plugins.PropertyGRPCAddress:  addressFlag,
+				plugins.PropertyTTRPCAddress: ttrpcAddress,
+			},
 		)
-		initContext.Address = addressFlag
-		initContext.TTRPCAddress = ttrpcAddress
 
 		// load the plugin specific configuration if it is provided
 		// TODO: Read configuration passed into shim, or from state directory?
@@ -350,7 +360,7 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 		}
 
 		if src, ok := instance.(TTRPCService); ok {
-			logrus.WithField("id", id).Debug("registering ttrpc service")
+			log.G(ctx).WithField("id", id).Debug("registering ttrpc service")
 			ttrpcServices = append(ttrpcServices, src)
 
 		}
@@ -377,7 +387,7 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 	}
 
 	if err := serve(ctx, server, signals, sd.Shutdown); err != nil {
-		if err != shutdown.ErrShutdown {
+		if !errors.Is(err, shutdown.ErrShutdown) {
 			return err
 		}
 	}
@@ -389,10 +399,10 @@ func run(ctx context.Context, manager Manager, name string, config Config) error
 	}
 
 	select {
-	case <-publisher.Done():
+	case <-sd.Done():
 		return nil
 	case <-time.After(5 * time.Second):
-		return errors.New("publisher not closed")
+		return errors.New("shim shutdown timeout")
 	}
 }
 
@@ -432,7 +442,7 @@ func serve(ctx context.Context, server *ttrpc.Server, signals chan os.Signal, sh
 	return reap(ctx, logger, signals)
 }
 
-func dumpStacks(logger *logrus.Entry) {
+func dumpStacks(logger *log.Entry) {
 	var (
 		buf       []byte
 		stackSize int

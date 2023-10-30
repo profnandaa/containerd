@@ -26,9 +26,9 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/transfer"
 	"github.com/containerd/containerd/pkg/unpack"
+	"github.com/containerd/log"
 )
 
 func (ts *localTransferService) importStream(ctx context.Context, i transfer.ImageImporter, is transfer.ImageStorer, tops *transfer.Config) error {
@@ -113,8 +113,18 @@ func (ts *localTransferService) importStream(ctx context.Context, i transfer.Ima
 	}
 
 	if err := images.WalkNotEmpty(ctx, handler, index); err != nil {
+		if unpacker != nil {
+			// wait for unpacker to cleanup
+			unpacker.Wait()
+		}
 		// TODO: Handle Not Empty as a special case on the input
 		return err
+	}
+
+	if unpacker != nil {
+		if _, err = unpacker.Wait(); err != nil {
+			return err
+		}
 	}
 
 	for _, desc := range descriptors {

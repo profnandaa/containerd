@@ -26,7 +26,7 @@ import (
 	"github.com/containerd/containerd"
 	containerdio "github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	cio "github.com/containerd/containerd/pkg/cri/io"
@@ -149,6 +149,7 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 			}
 		}
 	}()
+
 	err = c.nri.StartContainer(ctx, &sandbox, &cntr)
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("NRI container start failed")

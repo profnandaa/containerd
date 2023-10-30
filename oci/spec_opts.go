@@ -32,13 +32,13 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/log"
+	"github.com/moby/sys/user"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/opencontainers/runc/libcontainer/user"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -185,13 +185,6 @@ func WithEnv(environmentVariables []string) SpecOpts {
 		}
 		return nil
 	}
-}
-
-// WithDefaultPathEnv sets the $PATH environment variable to the
-// default PATH defined in this package.
-func WithDefaultPathEnv(_ context.Context, _ Client, _ *containers.Container, s *Spec) error {
-	s.Process.Env = replaceOrAppendEnvValues(s.Process.Env, defaultUnixEnv)
-	return nil
 }
 
 // replaceOrAppendEnvValues returns the defaults with the overrides either
@@ -376,26 +369,24 @@ func WithImageConfigArgs(image Image, args []string) SpecOpts {
 		if err != nil {
 			return err
 		}
+		if !images.IsConfigType(ic.MediaType) {
+			return fmt.Errorf("unknown image config media type %s", ic.MediaType)
+		}
+
 		var (
 			imageConfigBytes []byte
 			ociimage         v1.Image
 			config           v1.ImageConfig
 		)
-		switch ic.MediaType {
-		case v1.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
-			var err error
-			imageConfigBytes, err = content.ReadBlob(ctx, image.ContentStore(), ic)
-			if err != nil {
-				return err
-			}
-
-			if err := json.Unmarshal(imageConfigBytes, &ociimage); err != nil {
-				return err
-			}
-			config = ociimage.Config
-		default:
-			return fmt.Errorf("unknown image config media type %s", ic.MediaType)
+		imageConfigBytes, err = content.ReadBlob(ctx, image.ContentStore(), ic)
+		if err != nil {
+			return err
 		}
+
+		if err = json.Unmarshal(imageConfigBytes, &ociimage); err != nil {
+			return err
+		}
+		config = ociimage.Config
 
 		appendOSMounts(s, ociimage.OS)
 		setProcess(s)
@@ -961,6 +952,11 @@ func WithCapabilities(caps []string) SpecOpts {
 		s.Process.Capabilities.Bounding = caps
 		s.Process.Capabilities.Effective = caps
 		s.Process.Capabilities.Permitted = caps
+		if len(caps) == 0 {
+			s.Process.Capabilities.Inheritable = nil
+		} else if len(s.Process.Capabilities.Inheritable) > 0 {
+			filterCaps(&s.Process.Capabilities.Inheritable, caps)
+		}
 
 		return nil
 	}
@@ -982,6 +978,16 @@ func removeCap(caps *[]string, s string) {
 			continue
 		}
 		newcaps = append(newcaps, c)
+	}
+	*caps = newcaps
+}
+
+func filterCaps(caps *[]string, filters []string) {
+	var newcaps []string
+	for _, c := range *caps {
+		if capsContain(filters, c) {
+			newcaps = append(newcaps, c)
+		}
 	}
 	*caps = newcaps
 }
@@ -1014,6 +1020,7 @@ func WithDroppedCapabilities(caps []string) SpecOpts {
 				&s.Process.Capabilities.Bounding,
 				&s.Process.Capabilities.Effective,
 				&s.Process.Capabilities.Permitted,
+				&s.Process.Capabilities.Inheritable,
 			} {
 				removeCap(cl, c)
 			}
@@ -1524,6 +1531,15 @@ func WithCPUCFS(quota int64, period uint64) SpecOpts {
 		setCPU(s)
 		s.Linux.Resources.CPU.Quota = &quota
 		s.Linux.Resources.CPU.Period = &period
+		return nil
+	}
+}
+
+// WithCPUBurst sets the container's cpu burst
+func WithCPUBurst(burst uint64) SpecOpts {
+	return func(ctx context.Context, _ Client, c *containers.Container, s *Spec) error {
+		setCPU(s)
+		s.Linux.Resources.CPU.Burst = &burst
 		return nil
 	}
 }

@@ -31,24 +31,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	csapi "github.com/containerd/containerd/api/services/content/v1"
-	diffapi "github.com/containerd/containerd/api/services/diff/v1"
-	ssapi "github.com/containerd/containerd/api/services/snapshots/v1"
-	"github.com/containerd/containerd/content/local"
-	csproxy "github.com/containerd/containerd/content/proxy"
-	"github.com/containerd/containerd/defaults"
-	"github.com/containerd/containerd/diff"
-	diffproxy "github.com/containerd/containerd/diff/proxy"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/pkg/dialer"
-	"github.com/containerd/containerd/pkg/timeout"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/plugin"
-	srvconfig "github.com/containerd/containerd/services/server/config"
-	ssproxy "github.com/containerd/containerd/snapshots/proxy"
-	"github.com/containerd/containerd/sys"
+	"github.com/containerd/log"
 	"github.com/containerd/ttrpc"
 	"github.com/docker/go-metrics"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
@@ -59,6 +45,29 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+
+	csapi "github.com/containerd/containerd/api/services/content/v1"
+	diffapi "github.com/containerd/containerd/api/services/diff/v1"
+	sbapi "github.com/containerd/containerd/api/services/sandbox/v1"
+	ssapi "github.com/containerd/containerd/api/services/snapshots/v1"
+	"github.com/containerd/containerd/content/local"
+	csproxy "github.com/containerd/containerd/content/proxy"
+	"github.com/containerd/containerd/defaults"
+	"github.com/containerd/containerd/diff"
+	diffproxy "github.com/containerd/containerd/diff/proxy"
+	"github.com/containerd/containerd/pkg/deprecation"
+	"github.com/containerd/containerd/pkg/dialer"
+	"github.com/containerd/containerd/pkg/timeout"
+	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/dynamic"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
+	sbproxy "github.com/containerd/containerd/sandbox/proxy"
+	srvconfig "github.com/containerd/containerd/services/server/config"
+	"github.com/containerd/containerd/services/warning"
+	ssproxy "github.com/containerd/containerd/snapshots/proxy"
+	"github.com/containerd/containerd/sys"
 )
 
 // CreateTopLevelDirectories creates the top-level root and state directories.
@@ -102,6 +111,20 @@ func CreateTopLevelDirectories(config *srvconfig.Config) error {
 
 // New creates and initializes a new containerd server
 func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
+	var (
+		version    = config.Version
+		migrationT time.Duration
+	)
+	if version < srvconfig.CurrentConfigVersion {
+		// Migrate config to latest version
+		t1 := time.Now()
+		err := config.MigrateConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		migrationT = time.Since(t1)
+	}
+
 	if err := apply(ctx, config); err != nil {
 		return nil, err
 	}
@@ -112,7 +135,7 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		}
 		timeout.Set(key, d)
 	}
-	plugins, err := LoadPlugins(ctx, config)
+	loaded, err := LoadPlugins(ctx, config)
 	if err != nil {
 		return nil, err
 	}
@@ -201,24 +224,50 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 	for _, r := range config.RequiredPlugins {
 		required[r] = struct{}{}
 	}
-	for _, p := range plugins {
+
+	if version < srvconfig.CurrentConfigVersion {
+		t1 := time.Now()
+		// Run migration for each configuration version
+		// Run each plugin migration for each version to ensure that migration logic is simple and
+		// focused on upgrading from one version at a time.
+		for v := version; v < srvconfig.CurrentConfigVersion; v++ {
+			for _, p := range loaded {
+				if p.ConfigMigration != nil {
+					if err := p.ConfigMigration(ctx, v, config.Plugins); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+		migrationT = migrationT + time.Since(t1)
+	}
+	if migrationT > 0 {
+		log.G(ctx).WithField("t", migrationT).Warnf("Configuration migrated from version %d, use `containerd config migrate` to avoid migration", version)
+	}
+
+	for _, p := range loaded {
 		id := p.URI()
 		log.G(ctx).WithField("type", p.Type).Infof("loading plugin %q...", id)
+		var mustSucceed int32
 
 		initContext := plugin.NewContext(
 			ctx,
-			p,
 			initialized,
-			config.Root,
-			config.State,
+			map[string]string{
+				plugins.PropertyRootDir:      filepath.Join(config.Root, id),
+				plugins.PropertyStateDir:     filepath.Join(config.State, id),
+				plugins.PropertyGRPCAddress:  config.GRPC.Address,
+				plugins.PropertyTTRPCAddress: config.TTRPC.Address,
+			},
 		)
-		initContext.Address = config.GRPC.Address
-		initContext.TTRPCAddress = config.TTRPC.Address
-		initContext.RegisterReadiness = s.RegisterReadiness
+		initContext.RegisterReadiness = func() func() {
+			atomic.StoreInt32(&mustSucceed, 1)
+			return s.RegisterReadiness()
+		}
 
 		// load the plugin specific configuration if it is provided
 		if p.Config != nil {
-			pc, err := config.Decode(p)
+			pc, err := config.Decode(ctx, id, p.Config)
 			if err != nil {
 				return nil, err
 			}
@@ -238,6 +287,10 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			}
 			if _, ok := required[id]; ok {
 				return nil, fmt.Errorf("load required plugin %s: %w", id, err)
+			}
+			// If readiness was registered during initialization, the plugin cannot fail
+			if atomic.LoadInt32(&mustSucceed) != 0 {
+				return nil, fmt.Errorf("plugin failed after registering readiness %s: %w", id, err)
 			}
 			continue
 		}
@@ -280,7 +333,33 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 			return nil, err
 		}
 	}
+
+	recordConfigDeprecations(ctx, config, initialized)
 	return s, nil
+}
+
+// recordConfigDeprecations attempts to record use of any deprecated config field.  Failures are logged and ignored.
+func recordConfigDeprecations(ctx context.Context, config *srvconfig.Config, set *plugin.Set) {
+	// record any detected deprecations without blocking server startup
+	plugin, err := set.GetByID(plugins.WarningPlugin, plugins.DeprecationsPlugin)
+	if err != nil {
+		log.G(ctx).WithError(err).Warn("failed to load warning service to record deprecations")
+		return
+	}
+	instance, err := plugin.Instance()
+	if err != nil {
+		log.G(ctx).WithError(err).Warn("failed to load warning service to record deprecations")
+		return
+	}
+	warn, ok := instance.(warning.Service)
+	if !ok {
+		log.G(ctx).WithError(err).Warn("failed to load warning service to record deprecations, unexpected plugin type")
+		return
+	}
+
+	if config.PluginDir != "" { //nolint:staticcheck
+		warn.Emit(ctx, deprecation.GoPluginLibrary)
+	}
 }
 
 // Server is the containerd main daemon
@@ -381,22 +460,26 @@ func (s *Server) Wait() {
 
 // LoadPlugins loads all plugins into containerd and generates an ordered graph
 // of all plugins.
-func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Registration, error) {
+func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]plugin.Registration, error) {
 	// load all plugins into containerd
-	path := config.PluginDir
+	path := config.PluginDir //nolint:staticcheck
 	if path == "" {
 		path = filepath.Join(config.Root, "plugins")
 	}
-	if err := plugin.Load(path); err != nil {
+	if count, err := dynamic.Load(path); err != nil {
 		return nil, err
+	} else if count > 0 || config.PluginDir != "" { //nolint:staticcheck
+		config.PluginDir = path //nolint:staticcheck
+		log.G(ctx).Warningf("loaded %d dynamic plugins. `go_plugin` is deprecated, please use `external plugins` instead", count)
 	}
 	// load additional plugins that don't automatically register themselves
-	plugin.Register(&plugin.Registration{
-		Type: plugin.ContentPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.ContentPlugin,
 		ID:   "content",
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			ic.Meta.Exports["root"] = ic.Root
-			return local.NewStore(ic.Root)
+			root := ic.Properties[plugins.PropertyRootDir]
+			ic.Meta.Exports["root"] = root
+			return local.NewStore(root)
 		},
 	})
 
@@ -412,20 +495,25 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 		)
 
 		switch pp.Type {
-		case string(plugin.SnapshotPlugin), "snapshot":
-			t = plugin.SnapshotPlugin
+		case string(plugins.SnapshotPlugin), "snapshot":
+			t = plugins.SnapshotPlugin
 			ssname := name
 			f = func(conn *grpc.ClientConn) interface{} {
 				return ssproxy.NewSnapshotter(ssapi.NewSnapshotsClient(conn), ssname)
 			}
 
-		case string(plugin.ContentPlugin), "content":
-			t = plugin.ContentPlugin
+		case string(plugins.ContentPlugin), "content":
+			t = plugins.ContentPlugin
 			f = func(conn *grpc.ClientConn) interface{} {
 				return csproxy.NewContentStore(csapi.NewContentClient(conn))
 			}
-		case string(plugin.DiffPlugin), "diff":
-			t = plugin.DiffPlugin
+		case string(plugins.SandboxControllerPlugin), "sandbox":
+			t = plugins.SandboxControllerPlugin
+			f = func(conn *grpc.ClientConn) interface{} {
+				return sbproxy.NewSandboxController(sbapi.NewControllerClient(conn))
+			}
+		case string(plugins.DiffPlugin), "diff":
+			t = plugins.DiffPlugin
 			f = func(conn *grpc.ClientConn) interface{} {
 				return diffproxy.NewDiffApplier(diffapi.NewDiffClient(conn))
 			}
@@ -441,11 +529,17 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 			p = platforms.DefaultSpec()
 		}
 
-		plugin.Register(&plugin.Registration{
+		exports := pp.Exports
+		if exports == nil {
+			exports = map[string]string{}
+		}
+		exports["address"] = address
+
+		registry.Register(&plugin.Registration{
 			Type: t,
 			ID:   name,
 			InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-				ic.Meta.Exports["address"] = address
+				ic.Meta.Exports = exports
 				ic.Meta.Platforms = append(ic.Meta.Platforms, p)
 				conn, err := clients.getClient(address)
 				if err != nil {
@@ -459,7 +553,7 @@ func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]*plugin.Regis
 
 	filter := srvconfig.V2DisabledFilter
 	// return the ordered graph for plugins
-	return plugin.Graph(filter(config.DisabledPlugins)), nil
+	return registry.Graph(filter(config.DisabledPlugins)), nil
 }
 
 type proxyClients struct {

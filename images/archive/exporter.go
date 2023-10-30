@@ -170,8 +170,7 @@ func Export(ctx context.Context, store content.Provider, writer io.Writer, opts 
 	dManifests := map[digest.Digest]*exportManifest{}
 	resolvedIndex := map[digest.Digest]digest.Digest{}
 	for _, desc := range eo.manifests {
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest:
+		if images.IsManifestType(desc.MediaType) {
 			mt, ok := dManifests[desc.Digest]
 			if !ok {
 				// TODO(containerd): Skip if already added
@@ -191,7 +190,7 @@ func Export(ctx context.Context, store content.Provider, writer io.Writer, opts 
 			if name != "" {
 				mt.names = append(mt.names, name)
 			}
-		case images.MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex:
+		} else if images.IsIndexType(desc.MediaType) {
 			d, ok := resolvedIndex[desc.Digest]
 			if !ok {
 				if err := desc.Digest.Validate(); err != nil {
@@ -255,7 +254,7 @@ func Export(ctx context.Context, store content.Provider, writer io.Writer, opts 
 				}
 
 			}
-		default:
+		} else {
 			return fmt.Errorf("only manifests may be exported: %w", errdefs.ErrInvalidArgument)
 		}
 	}
@@ -321,10 +320,9 @@ func blobRecord(cs content.Provider, desc ocispec.Descriptor, opts *blobRecordOp
 	if opts != nil && opts.blobFilter != nil && !opts.blobFilter(desc) {
 		return tarRecord{}
 	}
-	path := path.Join("blobs", desc.Digest.Algorithm().String(), desc.Digest.Encoded())
 	return tarRecord{
 		Header: &tar.Header{
-			Name:     path,
+			Name:     path.Join(ocispec.ImageBlobsDir, desc.Digest.Algorithm().String(), desc.Digest.Encoded()),
 			Mode:     0444,
 			Size:     desc.Size,
 			Typeflag: tar.TypeReg,
@@ -404,7 +402,7 @@ func ociIndexRecord(manifests []ocispec.Descriptor) tarRecord {
 
 	return tarRecord{
 		Header: &tar.Header{
-			Name:     "index.json",
+			Name:     ocispec.ImageIndexFile,
 			Mode:     0644,
 			Size:     int64(len(b)),
 			Typeflag: tar.TypeReg,
@@ -444,10 +442,9 @@ func manifestsRecord(ctx context.Context, store content.Provider, manifests map[
 		if err := dgst.Validate(); err != nil {
 			return tarRecord{}, err
 		}
-		mfsts[i].Config = path.Join("blobs", dgst.Algorithm().String(), dgst.Encoded())
+		mfsts[i].Config = path.Join(ocispec.ImageBlobsDir, dgst.Algorithm().String(), dgst.Encoded())
 		for _, l := range manifest.Layers {
-			path := path.Join("blobs", l.Digest.Algorithm().String(), l.Digest.Encoded())
-			mfsts[i].Layers = append(mfsts[i].Layers, path)
+			mfsts[i].Layers = append(mfsts[i].Layers, path.Join(ocispec.ImageBlobsDir, l.Digest.Algorithm().String(), l.Digest.Encoded()))
 		}
 
 		for _, name := range m.names {

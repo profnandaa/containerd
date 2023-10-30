@@ -18,6 +18,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -26,33 +29,44 @@ import (
 	api "github.com/containerd/containerd/api/services/sandbox/v1"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/protobuf"
 	"github.com/containerd/containerd/sandbox"
+	"github.com/containerd/containerd/services"
+	"github.com/containerd/log"
 )
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.GRPCPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.GRPCPlugin,
 		ID:   "sandbox-controllers",
 		Requires: []plugin.Type{
-			plugin.SandboxControllerPlugin,
-			plugin.EventPlugin,
+			plugins.ServicePlugin,
+			plugins.EventPlugin,
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			sc, err := ic.GetByID(plugin.SandboxControllerPlugin, "local")
+			plugs, err := ic.GetByType(plugins.ServicePlugin)
 			if err != nil {
 				return nil, err
 			}
-
-			ep, err := ic.Get(plugin.EventPlugin)
+			p, ok := plugs[services.SandboxControllersService]
+			if !ok {
+				return nil, errors.New("sandboxes service not found")
+			}
+			i, err := p.Instance()
+			if err != nil {
+				return nil, err
+			}
+			sc := i.(map[string]sandbox.Controller)
+			ep, err := ic.Get(plugins.EventPlugin)
 			if err != nil {
 				return nil, err
 			}
 
 			return &controllerService{
-				local:     sc.(sandbox.Controller),
+				sc:        sc,
 				publisher: ep.(events.Publisher),
 			}, nil
 		},
@@ -60,7 +74,7 @@ func init() {
 }
 
 type controllerService struct {
-	local     sandbox.Controller
+	sc        map[string]sandbox.Controller
 	publisher events.Publisher
 	api.UnimplementedControllerServer
 }
@@ -72,10 +86,24 @@ func (s *controllerService) Register(server *grpc.Server) error {
 	return nil
 }
 
+func (s *controllerService) getController(name string) (sandbox.Controller, error) {
+	if len(name) == 0 {
+		return nil, fmt.Errorf("%w: sandbox controller name can not be empty", errdefs.ErrInvalidArgument)
+	}
+	if ctrl, ok := s.sc[name]; ok {
+		return ctrl, nil
+	}
+	return nil, fmt.Errorf("%w: failed to get sandbox controller by %s", errdefs.ErrNotFound, name)
+}
+
 func (s *controllerService) Create(ctx context.Context, req *api.ControllerCreateRequest) (*api.ControllerCreateResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("create sandbox")
 	// TODO: Rootfs
-	err := s.local.Create(ctx, req.GetSandboxID(), sandbox.WithOptions(req.GetOptions()))
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	err = ctrl.Create(ctx, sandbox.Sandbox{ID: req.GetSandboxID()}, sandbox.WithOptions(req.GetOptions()))
 	if err != nil {
 		return &api.ControllerCreateResponse{}, errdefs.ToGRPC(err)
 	}
@@ -93,7 +121,11 @@ func (s *controllerService) Create(ctx context.Context, req *api.ControllerCreat
 
 func (s *controllerService) Start(ctx context.Context, req *api.ControllerStartRequest) (*api.ControllerStartResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("start sandbox")
-	inst, err := s.local.Start(ctx, req.GetSandboxID())
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	inst, err := ctrl.Start(ctx, req.GetSandboxID())
 	if err != nil {
 		return &api.ControllerStartResponse{}, errdefs.ToGRPC(err)
 	}
@@ -114,12 +146,20 @@ func (s *controllerService) Start(ctx context.Context, req *api.ControllerStartR
 
 func (s *controllerService) Stop(ctx context.Context, req *api.ControllerStopRequest) (*api.ControllerStopResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("delete sandbox")
-	return &api.ControllerStopResponse{}, errdefs.ToGRPC(s.local.Stop(ctx, req.GetSandboxID()))
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	return &api.ControllerStopResponse{}, errdefs.ToGRPC(ctrl.Stop(ctx, req.GetSandboxID(), sandbox.WithTimeout(time.Duration(req.TimeoutSecs)*time.Second)))
 }
 
 func (s *controllerService) Wait(ctx context.Context, req *api.ControllerWaitRequest) (*api.ControllerWaitResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("wait sandbox")
-	exitStatus, err := s.local.Wait(ctx, req.GetSandboxID())
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	exitStatus, err := ctrl.Wait(ctx, req.GetSandboxID())
 	if err != nil {
 		return &api.ControllerWaitResponse{}, errdefs.ToGRPC(err)
 	}
@@ -140,9 +180,20 @@ func (s *controllerService) Wait(ctx context.Context, req *api.ControllerWaitReq
 
 func (s *controllerService) Status(ctx context.Context, req *api.ControllerStatusRequest) (*api.ControllerStatusResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("sandbox status")
-	cstatus, err := s.local.Status(ctx, req.GetSandboxID(), req.GetVerbose())
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	cstatus, err := ctrl.Status(ctx, req.GetSandboxID(), req.GetVerbose())
 	if err != nil {
 		return &api.ControllerStatusResponse{}, errdefs.ToGRPC(err)
+	}
+	extra := &anypb.Any{}
+	if cstatus.Extra != nil {
+		extra = &anypb.Any{
+			TypeUrl: cstatus.Extra.GetTypeUrl(),
+			Value:   cstatus.Extra.GetValue(),
+		}
 	}
 	return &api.ControllerStatusResponse{
 		SandboxID: cstatus.SandboxID,
@@ -151,22 +202,26 @@ func (s *controllerService) Status(ctx context.Context, req *api.ControllerStatu
 		Info:      cstatus.Info,
 		CreatedAt: protobuf.ToTimestamp(cstatus.CreatedAt),
 		ExitedAt:  protobuf.ToTimestamp(cstatus.ExitedAt),
-		Extra: &anypb.Any{
-			TypeUrl: cstatus.Extra.GetTypeUrl(),
-			Value:   cstatus.Extra.GetValue(),
-		},
+		Extra:     extra,
 	}, nil
 }
 
 func (s *controllerService) Shutdown(ctx context.Context, req *api.ControllerShutdownRequest) (*api.ControllerShutdownResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("shutdown sandbox")
-	return &api.ControllerShutdownResponse{}, errdefs.ToGRPC(s.local.Shutdown(ctx, req.GetSandboxID()))
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	return &api.ControllerShutdownResponse{}, errdefs.ToGRPC(ctrl.Shutdown(ctx, req.GetSandboxID()))
 }
 
 func (s *controllerService) Metrics(ctx context.Context, req *api.ControllerMetricsRequest) (*api.ControllerMetricsResponse, error) {
 	log.G(ctx).WithField("req", req).Debug("sandbox metrics")
-
-	metrics, err := s.local.Metrics(ctx, req.GetSandboxID())
+	ctrl, err := s.getController(req.Sandboxer)
+	if err != nil {
+		return nil, errdefs.ToGRPC(err)
+	}
+	metrics, err := ctrl.Metrics(ctx, req.GetSandboxID())
 	if err != nil {
 		return &api.ControllerMetricsResponse{}, errdefs.ToGRPC(err)
 	}

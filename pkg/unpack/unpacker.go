@@ -33,13 +33,13 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/pkg/cleanup"
 	"github.com/containerd/containerd/pkg/kmutex"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/tracing"
+	"github.com/containerd/log"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -179,8 +179,7 @@ func (u *Unpacker) Unpack(h images.Handler) images.Handler {
 			return children, err
 		}
 
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest:
+		if images.IsManifestType(desc.MediaType) {
 			var nonLayers []ocispec.Descriptor
 			var manifestLayers []ocispec.Descriptor
 			// Split layers from non-layers, layers will be handled after
@@ -203,7 +202,7 @@ func (u *Unpacker) Unpack(h images.Handler) images.Handler {
 			lock.Unlock()
 
 			children = nonLayers
-		case images.MediaTypeDockerSchema2Config, ocispec.MediaTypeImageConfig:
+		} else if images.IsConfigType(desc.MediaType) {
 			lock.Lock()
 			l := layers[desc.Digest]
 			lock.Unlock()

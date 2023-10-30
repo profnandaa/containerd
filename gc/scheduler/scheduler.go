@@ -24,8 +24,10 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/gc"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
+	"github.com/containerd/log"
 )
 
 // config configures the garbage collection policies.
@@ -96,11 +98,11 @@ func (d duration) MarshalText() (text []byte, err error) {
 }
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.GCPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.GCPlugin,
 		ID:   "scheduler",
 		Requires: []plugin.Type{
-			plugin.MetadataPlugin,
+			plugins.MetadataPlugin,
 		},
 		Config: &config{
 			PauseThreshold:    0.02,
@@ -110,14 +112,14 @@ func init() {
 			StartupDelay:      duration(100 * time.Millisecond),
 		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			md, err := ic.Get(plugin.MetadataPlugin)
+			md, err := ic.Get(plugins.MetadataPlugin)
 			if err != nil {
 				return nil, err
 			}
 
 			mdCollector, ok := md.(collector)
 			if !ok {
-				return nil, fmt.Errorf("%s %T must implement collector", plugin.MetadataPlugin, md)
+				return nil, fmt.Errorf("%s %T must implement collector", plugins.MetadataPlugin, md)
 			}
 
 			m := newScheduler(mdCollector, ic.Config.(*config))

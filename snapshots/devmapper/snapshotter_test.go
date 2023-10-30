@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/containerd/continuity/fs/fstest"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/containerd/containerd/mount"
@@ -36,12 +35,13 @@ import (
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/devmapper/dmsetup"
 	"github.com/containerd/containerd/snapshots/testsuite"
+	"github.com/containerd/log"
 )
 
 func TestSnapshotterSuite(t *testing.T) {
 	testutil.RequiresRoot(t)
 
-	logrus.SetLevel(logrus.DebugLevel)
+	assert.NoError(t, log.SetLevel("debug"))
 
 	snapshotterFn := func(ctx context.Context, root string) (snapshots.Snapshotter, func() error, error) {
 		poolName := fmt.Sprintf("containerd-snapshotter-suite-pool-%d", time.Now().Nanosecond())
@@ -138,7 +138,7 @@ func TestMkfsXfsNonDefault(t *testing.T) {
 func TestMultipleXfsMounts(t *testing.T) {
 	testutil.RequiresRoot(t)
 
-	logrus.SetLevel(logrus.DebugLevel)
+	assert.NoError(t, log.SetLevel("debug"))
 
 	ctx := context.Background()
 	ctx = namespaces.WithNamespace(ctx, "testsuite")

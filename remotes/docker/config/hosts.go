@@ -20,7 +20,6 @@ package config
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -28,14 +27,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/pelletier/go-toml"
+	"github.com/containerd/log"
+	"github.com/pelletier/go-toml/v2"
+	tomlu "github.com/pelletier/go-toml/v2/unstable"
 )
 
 // UpdateClientFunc is a function that lets you to amend http Client behavior used by registry clients.
@@ -101,12 +100,22 @@ func ConfigureHosts(ctx context.Context, options HostOptions) docker.RegistryHos
 				hosts[len(hosts)-1].host = "registry-1.docker.io"
 			} else if docker.IsLocalhost(host) {
 				hosts[len(hosts)-1].host = host
-				if options.DefaultScheme == "" || options.DefaultScheme == "http" {
-					hosts[len(hosts)-1].scheme = "http"
+				if options.DefaultScheme == "" {
+					_, port, _ := net.SplitHostPort(host)
+					if port == "" || port == "443" {
+						// If port is default or 443, only use https
+						hosts[len(hosts)-1].scheme = "https"
+					} else {
+						// HTTP fallback logic will be used when protocol is ambiguous
+						hosts[len(hosts)-1].scheme = "http"
+					}
 
-					// Skipping TLS verification for localhost
-					var skipVerify = true
-					hosts[len(hosts)-1].skipVerify = &skipVerify
+					// When port is 80, protocol is not ambiguous
+					if port != "80" {
+						// Skipping TLS verification for localhost
+						var skipVerify = true
+						hosts[len(hosts)-1].skipVerify = &skipVerify
+					}
 				} else {
 					hosts[len(hosts)-1].scheme = options.DefaultScheme
 				}
@@ -122,8 +131,13 @@ func ConfigureHosts(ctx context.Context, options HostOptions) docker.RegistryHos
 			hosts[len(hosts)-1].capabilities = docker.HostCapabilityPull | docker.HostCapabilityResolve | docker.HostCapabilityPush
 		}
 
+		// tlsConfigured indicates that TLS was configured and HTTP endpoints should
+		// attempt to use the TLS configuration before falling back to HTTP
+		var tlsConfigured bool
+
 		var defaultTLSConfig *tls.Config
 		if options.DefaultTLS != nil {
+			tlsConfigured = true
 			defaultTLSConfig = options.DefaultTLS
 		} else {
 			defaultTLSConfig = &tls.Config{}
@@ -161,14 +175,11 @@ func ConfigureHosts(ctx context.Context, options HostOptions) docker.RegistryHos
 
 		rhosts := make([]docker.RegistryHost, len(hosts))
 		for i, host := range hosts {
-
-			rhosts[i].Scheme = host.scheme
-			rhosts[i].Host = host.host
-			rhosts[i].Path = host.path
-			rhosts[i].Capabilities = host.capabilities
-			rhosts[i].Header = host.header
+			// Allow setting for each host as well
+			explicitTLS := tlsConfigured
 
 			if host.caCerts != nil || host.clientPairs != nil || host.skipVerify != nil {
+				explicitTLS = true
 				tr := defaultTransport.Clone()
 				tlsConfig := tr.TLSClientConfig
 				if host.skipVerify != nil {
@@ -193,29 +204,27 @@ func ConfigureHosts(ctx context.Context, options HostOptions) docker.RegistryHos
 					}
 				}
 
-				if host.clientPairs != nil {
-					for _, pair := range host.clientPairs {
-						certPEMBlock, err := os.ReadFile(pair[0])
-						if err != nil {
-							return nil, fmt.Errorf("unable to read CERT file %q: %w", pair[0], err)
-						}
-						var keyPEMBlock []byte
-						if pair[1] != "" {
-							keyPEMBlock, err = os.ReadFile(pair[1])
-							if err != nil {
-								return nil, fmt.Errorf("unable to read CERT file %q: %w", pair[1], err)
-							}
-						} else {
-							// Load key block from same PEM file
-							keyPEMBlock = certPEMBlock
-						}
-						cert, err := tls.X509KeyPair(certPEMBlock, keyPEMBlock)
-						if err != nil {
-							return nil, fmt.Errorf("failed to load X509 key pair: %w", err)
-						}
-
-						tlsConfig.Certificates = append(tlsConfig.Certificates, cert)
+				for _, pair := range host.clientPairs {
+					certPEMBlock, err := os.ReadFile(pair[0])
+					if err != nil {
+						return nil, fmt.Errorf("unable to read CERT file %q: %w", pair[0], err)
 					}
+					var keyPEMBlock []byte
+					if pair[1] != "" {
+						keyPEMBlock, err = os.ReadFile(pair[1])
+						if err != nil {
+							return nil, fmt.Errorf("unable to read CERT file %q: %w", pair[1], err)
+						}
+					} else {
+						// Load key block from same PEM file
+						keyPEMBlock = certPEMBlock
+					}
+					cert, err := tls.X509KeyPair(certPEMBlock, keyPEMBlock)
+					if err != nil {
+						return nil, fmt.Errorf("failed to load X509 key pair: %w", err)
+					}
+
+					tlsConfig.Certificates = append(tlsConfig.Certificates, cert)
 				}
 
 				c := *client
@@ -232,6 +241,27 @@ func ConfigureHosts(ctx context.Context, options HostOptions) docker.RegistryHos
 				rhosts[i].Client = client
 				rhosts[i].Authorizer = authorizer
 			}
+
+			// When TLS has been configured for the operation or host and
+			// the protocol from the port number is ambiguous, use the
+			// docker.HTTPFallback roundtripper to catch TLS errors and re-attempt the
+			// request as http. This allows preference for https when configured but
+			// also catches TLS errors early enough in the request to avoid sending
+			// the request twice or consuming the request body.
+			if host.scheme == "http" && explicitTLS {
+				_, port, _ := net.SplitHostPort(host.host)
+				if port != "" && port != "80" {
+					log.G(ctx).WithField("host", host.host).Info("host will try HTTPS first since it is configured for HTTP with a TLS configuration, consider changing host to HTTPS or removing unused TLS configuration")
+					host.scheme = "https"
+					rhosts[i].Client.Transport = docker.HTTPFallback{RoundTripper: rhosts[i].Client.Transport}
+				}
+			}
+
+			rhosts[i].Scheme = host.scheme
+			rhosts[i].Host = host.host
+			rhosts[i].Path = host.path
+			rhosts[i].Capabilities = host.capabilities
+			rhosts[i].Header = host.header
 		}
 
 		return rhosts, nil
@@ -325,17 +355,13 @@ type hostFileConfig struct {
 }
 
 func parseHostsFile(baseDir string, b []byte) ([]hostConfig, error) {
-	tree, err := toml.LoadBytes(b)
+	orderedHosts, err := getSortedHosts(b)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse TOML: %w", err)
+		return nil, err
 	}
 
-	// HACK: we want to keep toml parsing structures private in this package, however go-toml ignores private embedded types.
-	// so we remap it to a public type within the func body, so technically it's public, but not possible to import elsewhere.
-	type HostFileConfig = hostFileConfig
-
 	c := struct {
-		HostFileConfig
+		hostFileConfig
 		// Server specifies the default server. When `host` is
 		// also specified, those hosts are tried first.
 		Server string `toml:"server"`
@@ -343,16 +369,11 @@ func parseHostsFile(baseDir string, b []byte) ([]hostConfig, error) {
 		HostConfigs map[string]hostFileConfig `toml:"host"`
 	}{}
 
-	orderedHosts, err := getSortedHosts(tree)
-	if err != nil {
-		return nil, err
-	}
-
 	var (
 		hosts []hostConfig
 	)
 
-	if err := tree.Unmarshal(&c); err != nil {
+	if err := toml.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
 
@@ -368,7 +389,7 @@ func parseHostsFile(baseDir string, b []byte) ([]hostConfig, error) {
 	}
 
 	// Parse root host config and append it as the last element
-	parsed, err := parseHostConfig(c.Server, baseDir, c.HostFileConfig)
+	parsed, err := parseHostConfig(c.Server, baseDir, c.hostFileConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -493,24 +514,41 @@ func parseHostConfig(server string, baseDir string, config hostFileConfig) (host
 	return result, nil
 }
 
-// getSortedHosts returns the list of hosts as they defined in the file.
-func getSortedHosts(root *toml.Tree) ([]string, error) {
-	iter, ok := root.Get("host").(*toml.Tree)
-	if !ok {
-		return nil, errors.New("invalid `host` tree")
+// getSortedHosts returns the list of hosts in the order are they defined in the file.
+func getSortedHosts(b []byte) ([]string, error) {
+	var hostsInOrder []string
+
+	// Use toml unstable package for directly parsing toml
+	// See https://github.com/pelletier/go-toml/discussions/801#discussioncomment-7083586
+	p := tomlu.Parser{}
+	p.Reset(b)
+
+	var host string
+	// iterate over all top level expressions
+	for p.NextExpression() {
+		e := p.Expression()
+
+		if e.Kind != tomlu.Table {
+			continue
+		}
+
+		// Let's look at the key. It's an iterator over the multiple dotted parts of the key.
+		var parts []string
+		for it := e.Key(); it.Next(); {
+			parts = append(parts, string(it.Node().Data))
+		}
+
+		// only consider keys that look like `hosts.XXX`
+		// and skip subtables such as `hosts.XXX.header`
+		if len(parts) < 2 || parts[0] != "host" || parts[1] == host {
+			continue
+		}
+
+		host = parts[1]
+		hostsInOrder = append(hostsInOrder, host)
 	}
 
-	list := append([]string{}, iter.Keys()...)
-
-	// go-toml stores TOML sections in the map object, so no order guaranteed.
-	// We retrieve line number for each key and sort the keys by position.
-	sort.Slice(list, func(i, j int) bool {
-		h1 := iter.GetPath([]string{list[i]}).(*toml.Tree)
-		h2 := iter.GetPath([]string{list[j]}).(*toml.Tree)
-		return h1.Position().Line < h2.Position().Line
-	})
-
-	return list, nil
+	return hostsInOrder, nil
 }
 
 // makeStringSlice is a helper func to convert from []interface{} to []string.

@@ -22,12 +22,14 @@ import (
 	transferapi "github.com/containerd/containerd/api/services/transfer/v1"
 	transferTypes "github.com/containerd/containerd/api/types/transfer"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/streaming"
 	"github.com/containerd/containerd/pkg/transfer"
-	"github.com/containerd/containerd/pkg/transfer/plugins"
+	tplugins "github.com/containerd/containerd/pkg/transfer/plugins"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	ptypes "github.com/containerd/containerd/protobuf/types"
+	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -36,12 +38,12 @@ import (
 )
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.GRPCPlugin,
+	registry.Register(&plugin.Registration{
+		Type: plugins.GRPCPlugin,
 		ID:   "transfer",
 		Requires: []plugin.Type{
-			plugin.TransferPlugin,
-			plugin.StreamingPlugin,
+			plugins.TransferPlugin,
+			plugins.StreamingPlugin,
 		},
 		InitFn: newService,
 	})
@@ -54,21 +56,21 @@ type service struct {
 }
 
 func newService(ic *plugin.InitContext) (interface{}, error) {
-	plugins, err := ic.GetByType(plugin.TransferPlugin)
+	sps, err := ic.GetByType(plugins.TransferPlugin)
 	if err != nil {
 		return nil, err
 	}
 
 	// TODO: how to determine order?
-	t := make([]transfer.Transferrer, 0, len(plugins))
-	for _, p := range plugins {
+	t := make([]transfer.Transferrer, 0, len(sps))
+	for _, p := range sps {
 		i, err := p.Instance()
 		if err != nil {
 			return nil, err
 		}
 		t = append(t, i.(transfer.Transferrer))
 	}
-	sp, err := ic.GetByID(plugin.StreamingPlugin, "manager")
+	sp, err := ic.GetByID(plugins.StreamingPlugin, "manager")
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +136,7 @@ func (s *service) Transfer(ctx context.Context, req *transferapi.TransferRequest
 }
 
 func (s *service) convertAny(ctx context.Context, a typeurl.Any) (interface{}, error) {
-	obj, err := plugins.ResolveType(a)
+	obj, err := tplugins.ResolveType(a)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
 			return typeurl.UnmarshalAny(a)

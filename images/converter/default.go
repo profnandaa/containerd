@@ -27,9 +27,9 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -123,7 +123,7 @@ func (c *defaultConverter) convert(ctx context.Context, cs content.Store, desc o
 			newDesc.Annotations = nil
 		}
 	}
-	logrus.WithField("old", desc).WithField("new", newDesc).Debugf("converted")
+	log.G(ctx).WithField("old", desc).WithField("new", newDesc).Debugf("converted")
 	return newDesc, nil
 }
 

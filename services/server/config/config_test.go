@@ -17,6 +17,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,8 +25,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/log/logtest"
 )
+
+func TestMigrations(t *testing.T) {
+	if len(migrations) != CurrentConfigVersion {
+		t.Fatalf("Migration missing, expected %d migrations, only %d defined", CurrentConfigVersion, len(migrations))
+	}
+}
 
 func TestMergeConfigs(t *testing.T) {
 	a := &Config{
@@ -115,7 +122,7 @@ root = "/var/lib/containerd"
 	assert.NoError(t, err)
 
 	var out Config
-	err = LoadConfig(path, &out)
+	err = LoadConfig(context.Background(), path, &out)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, out.Version)
 	assert.Equal(t, "/var/lib/containerd", out.Root)
@@ -147,7 +154,7 @@ disabled_plugins = ["io.containerd.v1.xyz"]
 	assert.NoError(t, err)
 
 	var out Config
-	err = LoadConfig(filepath.Join(tempDir, "data1.toml"), &out)
+	err = LoadConfig(context.Background(), filepath.Join(tempDir, "data1.toml"), &out)
 	assert.NoError(t, err)
 
 	assert.Equal(t, 2, out.Version)
@@ -175,7 +182,7 @@ imports = ["data1.toml", "data2.toml"]
 	assert.NoError(t, err)
 
 	var out Config
-	err = LoadConfig(filepath.Join(tempDir, "data1.toml"), &out)
+	err = LoadConfig(context.Background(), filepath.Join(tempDir, "data1.toml"), &out)
 	assert.NoError(t, err)
 
 	assert.Equal(t, 2, out.Version)
@@ -190,9 +197,10 @@ imports = ["data1.toml", "data2.toml"]
 }
 
 func TestDecodePlugin(t *testing.T) {
+	ctx := logtest.WithT(context.Background(), t)
 	data := `
 version = 2
-[plugins."io.containerd.runtime.v1.linux"]
+[plugins."io.containerd.runtime.v2.task"]
   shim_debug = true
 `
 
@@ -203,20 +211,21 @@ version = 2
 	assert.NoError(t, err)
 
 	var out Config
-	err = LoadConfig(path, &out)
+	err = LoadConfig(context.Background(), path, &out)
 	assert.NoError(t, err)
 
 	pluginConfig := map[string]interface{}{}
-	_, err = out.Decode(&plugin.Registration{Type: "io.containerd.runtime.v1", ID: "linux", Config: &pluginConfig})
+	_, err = out.Decode(ctx, "io.containerd.runtime.v2.task", &pluginConfig)
 	assert.NoError(t, err)
 	assert.Equal(t, true, pluginConfig["shim_debug"])
 }
 
-// TestDecodePluginInV1Config tests decoding non-versioned
-// config (should be parsed as V1 config).
+// TestDecodePluginInV1Config tests decoding non-versioned config
+// (should be parsed as V1 config) and migrated to latest.
 func TestDecodePluginInV1Config(t *testing.T) {
+	ctx := logtest.WithT(context.Background(), t)
 	data := `
-[plugins.linux]
+[plugins.task]
   shim_debug = true
 `
 
@@ -225,6 +234,16 @@ func TestDecodePluginInV1Config(t *testing.T) {
 	assert.NoError(t, err)
 
 	var out Config
-	err = LoadConfig(path, &out)
-	assert.ErrorContains(t, err, "config version `1` is no longer supported")
+	err = LoadConfig(context.Background(), path, &out)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, out.Version)
+
+	err = out.MigrateConfig(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, out.Version)
+
+	pluginConfig := map[string]interface{}{}
+	_, err = out.Decode(ctx, "io.containerd.runtime.v2.task", &pluginConfig)
+	assert.NoError(t, err)
+	assert.Equal(t, true, pluginConfig["shim_debug"])
 }

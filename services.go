@@ -31,6 +31,7 @@ import (
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/sandbox"
 	srv "github.com/containerd/containerd/services"
 	"github.com/containerd/containerd/services/introspection"
@@ -49,7 +50,7 @@ type services struct {
 	leasesService        leases.Manager
 	introspectionService introspection.Service
 	sandboxStore         sandbox.Store
-	sandboxController    sandbox.Controller
+	sandboxers           map[string]sandbox.Controller
 }
 
 // ServicesOpt allows callers to set options on the services
@@ -82,6 +83,16 @@ func WithSnapshotters(snapshotters map[string]snapshots.Snapshotter) ServicesOpt
 		s.snapshotters = make(map[string]snapshots.Snapshotter)
 		for n, sn := range snapshotters {
 			s.snapshotters[n] = sn
+		}
+	}
+}
+
+// WithSandboxers sets the sandbox controllers.
+func WithSandboxers(sandboxers map[string]sandbox.Controller) ServicesOpt {
+	return func(s *services) {
+		s.sandboxers = make(map[string]sandbox.Controller)
+		for n, sn := range sandboxers {
+			s.sandboxers[n] = sn
 		}
 	}
 }
@@ -170,30 +181,20 @@ func WithSandboxStore(client sandbox.Store) ServicesOpt {
 	}
 }
 
-// WithSandboxController sets the sandbox controller.
-func WithSandboxController(client sandbox.Controller) ServicesOpt {
-	return func(s *services) {
-		s.sandboxController = client
-	}
-}
-
 // WithInMemoryServices is suitable for cases when there is need to use containerd's client from
 // another (in-memory) containerd plugin (such as CRI).
 func WithInMemoryServices(ic *plugin.InitContext) ClientOpt {
 	return func(c *clientOpts) error {
 		var opts []ServicesOpt
 		for t, fn := range map[plugin.Type]func(interface{}) ServicesOpt{
-			plugin.EventPlugin: func(i interface{}) ServicesOpt {
+			plugins.EventPlugin: func(i interface{}) ServicesOpt {
 				return WithEventService(i.(EventService))
 			},
-			plugin.LeasePlugin: func(i interface{}) ServicesOpt {
+			plugins.LeasePlugin: func(i interface{}) ServicesOpt {
 				return WithLeasesService(i.(leases.Manager))
 			},
-			plugin.SandboxStorePlugin: func(i interface{}) ServicesOpt {
+			plugins.SandboxStorePlugin: func(i interface{}) ServicesOpt {
 				return WithSandboxStore(i.(sandbox.Store))
-			},
-			plugin.SandboxControllerPlugin: func(i interface{}) ServicesOpt {
-				return WithSandboxController(i.(sandbox.Controller))
 			},
 		} {
 			i, err := ic.Get(t)
@@ -203,7 +204,7 @@ func WithInMemoryServices(ic *plugin.InitContext) ClientOpt {
 			opts = append(opts, fn(i))
 		}
 
-		plugins, err := ic.GetByType(plugin.ServicePlugin)
+		plugins, err := ic.GetByType(plugins.ServicePlugin)
 		if err != nil {
 			return fmt.Errorf("failed to get service plugin: %w", err)
 		}
@@ -216,6 +217,9 @@ func WithInMemoryServices(ic *plugin.InitContext) ClientOpt {
 			},
 			srv.SnapshotsService: func(s interface{}) ServicesOpt {
 				return WithSnapshotters(s.(map[string]snapshots.Snapshotter))
+			},
+			srv.SandboxControllersService: func(s interface{}) ServicesOpt {
+				return WithSandboxers(s.(map[string]sandbox.Controller))
 			},
 			srv.ContainersService: func(s interface{}) ServicesOpt {
 				return WithContainerClient(s.(containersapi.ContainersClient))

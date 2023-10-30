@@ -26,13 +26,12 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/containerd/continuity/fs"
-	"github.com/sirupsen/logrus"
+	"github.com/containerd/log"
 )
 
 // upperdirKey is a key of an optional label to each snapshot.
@@ -46,6 +45,8 @@ type SnapshotterConfig struct {
 	upperdirLabel bool
 	ms            MetaStore
 	mountOptions  []string
+	remapIds      bool
+	slowChown     bool
 }
 
 // Opt is an option to configure the overlay snapshotter
@@ -93,12 +94,24 @@ func WithMetaStore(ms MetaStore) Opt {
 	}
 }
 
+func WithRemapIds(config *SnapshotterConfig) error {
+	config.remapIds = true
+	return nil
+}
+
+func WithSlowChown(config *SnapshotterConfig) error {
+	config.slowChown = true
+	return nil
+}
+
 type snapshotter struct {
 	root          string
 	ms            MetaStore
 	asyncRemove   bool
 	upperdirLabel bool
 	options       []string
+	remapIds      bool
+	slowChown     bool
 }
 
 // NewSnapshotter returns a Snapshotter which uses overlayfs. The overlayfs
@@ -137,7 +150,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		// figure out whether "userxattr" option is recognized by the kernel && needed
 		userxattr, err := overlayutils.NeedsUserXAttr(root)
 		if err != nil {
-			logrus.WithError(err).Warnf("cannot detect whether \"userxattr\" option needs to be used, assuming to be %v", userxattr)
+			log.L.WithError(err).Warnf("cannot detect whether \"userxattr\" option needs to be used, assuming to be %v", userxattr)
 		}
 		if userxattr {
 			config.mountOptions = append(config.mountOptions, "userxattr")
@@ -154,6 +167,8 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		asyncRemove:   config.asyncRemove,
 		upperdirLabel: config.upperdirLabel,
 		options:       config.mountOptions,
+		remapIds:      config.remapIds,
+		slowChown:     config.slowChown,
 	}, nil
 }
 
@@ -260,16 +275,22 @@ func (o *snapshotter) View(ctx context.Context, key, parent string, opts ...snap
 // This can be used to recover mounts after calling View or Prepare.
 func (o *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, err error) {
 	var s storage.Snapshot
+	var info snapshots.Info
 	if err := o.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		s, err = storage.GetSnapshot(ctx, key)
 		if err != nil {
 			return fmt.Errorf("failed to get active mount: %w", err)
 		}
+
+		_, info, _, err = storage.GetInfo(ctx, key)
+		if err != nil {
+			return fmt.Errorf("failed to get snapshot info: %w", err)
+		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return o.mounts(s), nil
+	return o.mounts(s, info), nil
 }
 
 func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
@@ -403,10 +424,46 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 	return cleanup, nil
 }
 
+func validateIDMapping(mapping string) error {
+	var (
+		hostID int
+		ctrID  int
+		length int
+	)
+
+	if _, err := fmt.Sscanf(mapping, "%d:%d:%d", &ctrID, &hostID, &length); err != nil {
+		return err
+	}
+	// Almost impossible, but snapshots.WithLabels doesn't check it
+	if ctrID < 0 || hostID < 0 || length < 0 {
+		return fmt.Errorf("invalid mapping \"%d:%d:%d\"", ctrID, hostID, length)
+	}
+	if ctrID != 0 {
+		return fmt.Errorf("container mapping of 0 is only supported")
+	}
+	return nil
+}
+
+func hostID(mapping string) (int, error) {
+	var (
+		hostID int
+		ctrID  int
+		length int
+	)
+	if err := validateIDMapping(mapping); err != nil {
+		return -1, fmt.Errorf("invalid mapping: %w", err)
+	}
+	if _, err := fmt.Sscanf(mapping, "%d:%d:%d", &ctrID, &hostID, &length); err != nil {
+		return -1, err
+	}
+	return hostID, nil
+}
+
 func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
 	var (
 		s        storage.Snapshot
 		td, path string
+		info     snapshots.Info
 	)
 
 	defer func() {
@@ -437,14 +494,46 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			return fmt.Errorf("failed to create snapshot: %w", err)
 		}
 
-		if len(s.ParentIDs) > 0 {
-			st, err := os.Stat(o.upperPath(s.ParentIDs[0]))
-			if err != nil {
-				return fmt.Errorf("failed to stat parent: %w", err)
-			}
+		_, info, _, err = storage.GetInfo(ctx, key)
+		if err != nil {
+			return fmt.Errorf("failed to get snapshot info: %w", err)
+		}
 
-			stat := st.Sys().(*syscall.Stat_t)
-			if err := os.Lchown(filepath.Join(td, "fs"), int(stat.Uid), int(stat.Gid)); err != nil {
+		mappedUID := -1
+		mappedGID := -1
+		// NOTE: if idmapped mounts' supported by hosted kernel there may be
+		// no parents at all, so overlayfs will not work and snapshotter
+		// will use bind mount. To be able to create file objects inside the
+		// rootfs -- just chown this only bound directory according to provided
+		// {uid,gid}map. In case of one/multiple parents -- chown upperdir.
+		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
+			if mappedUID, err = hostID(v); err != nil {
+				return fmt.Errorf("failed to parse UID mapping: %w", err)
+			}
+		}
+		if v, ok := info.Labels[snapshots.LabelSnapshotGIDMapping]; ok {
+			if mappedGID, err = hostID(v); err != nil {
+				return fmt.Errorf("failed to parse GID mapping: %w", err)
+			}
+		}
+
+		if mappedUID == -1 || mappedGID == -1 {
+			if len(s.ParentIDs) > 0 {
+				st, err := os.Stat(o.upperPath(s.ParentIDs[0]))
+				if err != nil {
+					return fmt.Errorf("failed to stat parent: %w", err)
+				}
+				stat, ok := st.Sys().(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("incompatible types after stat call: *syscall.Stat_t expected")
+				}
+				mappedUID = int(stat.Uid)
+				mappedGID = int(stat.Gid)
+			}
+		}
+
+		if mappedUID != -1 && mappedGID != -1 {
+			if err := os.Lchown(filepath.Join(td, "fs"), mappedUID, mappedGID); err != nil {
 				return fmt.Errorf("failed to chown: %w", err)
 			}
 		}
@@ -459,8 +548,7 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	}); err != nil {
 		return nil, err
 	}
-
-	return o.mounts(s), nil
+	return o.mounts(s, info), nil
 }
 
 func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
@@ -482,7 +570,18 @@ func (o *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 	return td, nil
 }
 
-func (o *snapshotter) mounts(s storage.Snapshot) []mount.Mount {
+func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mount {
+	var options []string
+
+	if o.remapIds {
+		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
+			options = append(options, fmt.Sprintf("uidmap=%s", v))
+		}
+		if v, ok := info.Labels[snapshots.LabelSnapshotGIDMapping]; ok {
+			options = append(options, fmt.Sprintf("gidmap=%s", v))
+		}
+	}
+
 	if len(s.ParentIDs) == 0 {
 		// if we only have one layer/no parents then just return a bind mount as overlay
 		// will not work
@@ -490,20 +589,18 @@ func (o *snapshotter) mounts(s storage.Snapshot) []mount.Mount {
 		if s.Kind == snapshots.KindView {
 			roFlag = "ro"
 		}
-
 		return []mount.Mount{
 			{
 				Source: o.upperPath(s.ID),
 				Type:   "bind",
-				Options: []string{
+				Options: append(options,
 					roFlag,
 					"rbind",
-				},
+				),
 			},
 		}
 	}
 
-	options := o.options
 	if s.Kind == snapshots.KindActive {
 		options = append(options,
 			fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
@@ -514,10 +611,10 @@ func (o *snapshotter) mounts(s storage.Snapshot) []mount.Mount {
 			{
 				Source: o.upperPath(s.ParentIDs[0]),
 				Type:   "bind",
-				Options: []string{
+				Options: append(options,
 					"ro",
 					"rbind",
-				},
+				),
 			},
 		}
 	}
@@ -526,8 +623,9 @@ func (o *snapshotter) mounts(s storage.Snapshot) []mount.Mount {
 	for i := range s.ParentIDs {
 		parentPaths[i] = o.upperPath(s.ParentIDs[i])
 	}
-
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(parentPaths, ":")))
+	options = append(options, o.options...)
+
 	return []mount.Mount{
 		{
 			Type:    "overlay",
@@ -535,7 +633,6 @@ func (o *snapshotter) mounts(s storage.Snapshot) []mount.Mount {
 			Options: options,
 		},
 	}
-
 }
 
 func (o *snapshotter) upperPath(id string) string {

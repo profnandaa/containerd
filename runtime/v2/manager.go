@@ -18,6 +18,7 @@ package v2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,17 +29,19 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events/exchange"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/cleanup"
 	"github.com/containerd/containerd/pkg/timeout"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugin/registry"
+	"github.com/containerd/containerd/plugins"
 	"github.com/containerd/containerd/protobuf"
 	"github.com/containerd/containerd/runtime"
 	shimbinary "github.com/containerd/containerd/runtime/v2/shim"
 	"github.com/containerd/containerd/sandbox"
+	"github.com/containerd/log"
 )
 
 // Config for the v2 runtime
@@ -50,12 +53,12 @@ type Config struct {
 }
 
 func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.RuntimePluginV2,
+	registry.Register(&plugin.Registration{
+		Type: plugins.RuntimePluginV2,
 		ID:   "task",
 		Requires: []plugin.Type{
-			plugin.EventPlugin,
-			plugin.MetadataPlugin,
+			plugins.EventPlugin,
+			plugins.MetadataPlugin,
 		},
 		Config: &Config{
 			Platforms: defaultPlatforms(),
@@ -69,11 +72,11 @@ func init() {
 
 			ic.Meta.Platforms = supportedPlatforms
 
-			m, err := ic.Get(plugin.MetadataPlugin)
+			m, err := ic.Get(plugins.MetadataPlugin)
 			if err != nil {
 				return nil, err
 			}
-			ep, err := ic.GetByID(plugin.EventPlugin, "exchange")
+			ep, err := ic.GetByID(plugins.EventPlugin, "exchange")
 			if err != nil {
 				return nil, err
 			}
@@ -82,10 +85,10 @@ func init() {
 			events := ep.(*exchange.Exchange)
 
 			shimManager, err := NewShimManager(ic.Context, &ManagerConfig{
-				Root:         ic.Root,
-				State:        ic.State,
-				Address:      ic.Address,
-				TTRPCAddress: ic.TTRPCAddress,
+				Root:         ic.Properties[plugins.PropertyRootDir],
+				State:        ic.Properties[plugins.PropertyStateDir],
+				Address:      ic.Properties[plugins.PropertyGRPCAddress],
+				TTRPCAddress: ic.Properties[plugins.PropertyTTRPCAddress],
 				Events:       events,
 				Store:        cs,
 				SchedCore:    config.SchedCore,
@@ -103,11 +106,11 @@ func init() {
 	// However, due to time limits and to avoid migration steps in 1.6 release,
 	// use the following workaround.
 	// This expected to be removed in 1.7.
-	plugin.Register(&plugin.Registration{
-		Type: plugin.RuntimePluginV2,
+	registry.Register(&plugin.Registration{
+		Type: plugins.RuntimePluginV2,
 		ID:   "shim",
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			taskManagerI, err := ic.GetByID(plugin.RuntimePluginV2, "task")
+			taskManagerI, err := ic.GetByID(plugins.RuntimePluginV2, "task")
 			if err != nil {
 				return nil, err
 			}
@@ -176,7 +179,7 @@ type ShimManager struct {
 
 // ID of the shim manager
 func (m *ShimManager) ID() string {
-	return plugin.RuntimePluginV2.String() + ".shim"
+	return plugins.RuntimePluginV2.String() + ".shim"
 }
 
 // Start launches a new shim instance
@@ -203,14 +206,13 @@ func (m *ShimManager) Start(ctx context.Context, id string, opts runtime.CreateO
 			return nil, err
 		}
 
-		address, err := shimbinary.ReadAddress(filepath.Join(m.state, process.Namespace(), opts.SandboxID, "address"))
+		params, err := restoreBootstrapParams(filepath.Join(m.state, process.Namespace(), opts.SandboxID))
 		if err != nil {
-			return nil, fmt.Errorf("failed to get socket address for sandbox %q: %w", opts.SandboxID, err)
+			return nil, err
 		}
 
-		// Use sandbox's socket address to handle task requests for this container.
-		if err := shimbinary.WriteAddress(filepath.Join(bundle.Path, "address"), address); err != nil {
-			return nil, err
+		if err := writeBootstrapParams(filepath.Join(bundle.Path, "bootstrap.json"), params); err != nil {
+			return nil, fmt.Errorf("failed to write bootstrap.json for bundle %s: %w", bundle.Path, err)
 		}
 
 		shim, err := loadShim(ctx, bundle, func() {})
@@ -280,6 +282,39 @@ func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, 
 	}
 
 	return shim, nil
+}
+
+// restoreBootstrapParams reads bootstrap.json to restore shim configuration.
+// If its an old shim, this will perform migration - read address file and write default bootstrap
+// configuration (version = 2, protocol = ttrpc, and address).
+func restoreBootstrapParams(bundlePath string) (shimbinary.BootstrapParams, error) {
+	filePath := filepath.Join(bundlePath, "bootstrap.json")
+
+	// Read bootstrap.json if exists
+	if _, err := os.Stat(filePath); err == nil {
+		return readBootstrapParams(filePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return shimbinary.BootstrapParams{}, fmt.Errorf("failed to stat %s: %w", filePath, err)
+	}
+
+	// File not found, likely its an older shim. Try migrate.
+
+	address, err := shimbinary.ReadAddress(filepath.Join(bundlePath, "address"))
+	if err != nil {
+		return shimbinary.BootstrapParams{}, fmt.Errorf("unable to migrate shim: failed to get socket address for bundle %s: %w", bundlePath, err)
+	}
+
+	params := shimbinary.BootstrapParams{
+		Version:  2,
+		Address:  address,
+		Protocol: "ttrpc",
+	}
+
+	if err := writeBootstrapParams(filePath, params); err != nil {
+		return shimbinary.BootstrapParams{}, fmt.Errorf("unable to migrate: failed to write bootstrap.json file: %w", err)
+	}
+
+	return params, nil
 }
 
 func (m *ShimManager) resolveRuntimePath(runtime string) (string, error) {
@@ -400,7 +435,7 @@ func NewTaskManager(shims *ShimManager) *TaskManager {
 
 // ID of the task manager
 func (m *TaskManager) ID() string {
-	return plugin.RuntimePluginV2.String() + ".task"
+	return plugins.RuntimePluginV2.String() + ".task"
 }
 
 // Create launches new shim instance and creates new task

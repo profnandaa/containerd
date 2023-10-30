@@ -30,10 +30,10 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/gc"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/cleanup"
 	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/log"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -325,6 +325,8 @@ func (m *DB) publishEvents(events []namespacedEvent) {
 			ctx := namespaces.WithNamespace(ctx, ne.namespace)
 			var topic string
 			switch ne.event.(type) {
+			case *eventstypes.ImageDelete:
+				topic = "/images/delete"
 			case *eventstypes.SnapshotRemove:
 				topic = "/snapshot/remove"
 			default:

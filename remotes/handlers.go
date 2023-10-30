@@ -29,8 +29,8 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/semaphore"
 )
@@ -71,17 +71,17 @@ func MakeRefKey(ctx context.Context, desc ocispec.Descriptor) string {
 		}
 	}
 
-	switch mt := desc.MediaType; {
-	case mt == images.MediaTypeDockerSchema2Manifest || mt == ocispec.MediaTypeImageManifest:
+	switch {
+	case images.IsManifestType(desc.MediaType):
 		return "manifest-" + key
-	case mt == images.MediaTypeDockerSchema2ManifestList || mt == ocispec.MediaTypeImageIndex:
+	case images.IsIndexType(desc.MediaType):
 		return "index-" + key
-	case images.IsLayerType(mt):
+	case images.IsLayerType(desc.MediaType):
 		return "layer-" + key
-	case images.IsKnownConfig(mt):
+	case images.IsKnownConfig(desc.MediaType):
 		return "config-" + key
 	default:
-		log.G(ctx).Warnf("reference for unknown type: %s", mt)
+		log.G(ctx).Warnf("reference for unknown type: %s", desc.MediaType)
 		return "unknown-" + key
 	}
 }
@@ -90,23 +90,21 @@ func MakeRefKey(ctx context.Context, desc ocispec.Descriptor) string {
 // discovered in a call to Dispatch. Use with ChildrenHandler to do a full
 // recursive fetch.
 func FetchHandler(ingester content.Ingester, fetcher Fetcher) images.HandlerFunc {
-	return func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, err error) {
+	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{
 			"digest":    desc.Digest,
 			"mediatype": desc.MediaType,
 			"size":      desc.Size,
 		}))
 
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema1Manifest:
+		if desc.MediaType == images.MediaTypeDockerSchema1Manifest {
 			return nil, fmt.Errorf("%v not supported", desc.MediaType)
-		default:
-			err := Fetch(ctx, ingester, fetcher, desc)
-			if errdefs.IsAlreadyExists(err) {
-				return nil, nil
-			}
-			return nil, err
 		}
+		err := Fetch(ctx, ingester, fetcher, desc)
+		if errdefs.IsAlreadyExists(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 }
 
@@ -204,8 +202,9 @@ func push(ctx context.Context, provider content.Provider, pusher Pusher, desc oc
 // Base handlers can be provided which will be called before any push specific
 // handlers.
 //
-// If the passed in content.Provider is also a content.Manager then this will
-// also annotate the distribution sources in the manager.
+// If the passed in content.Provider is also a content.InfoProvider (such as
+// content.Manager) then this will also annotate the distribution sources using
+// labels prefixed with "containerd.io/distribution.source".
 func PushContent(ctx context.Context, pusher Pusher, desc ocispec.Descriptor, store content.Provider, limiter *semaphore.Weighted, platform platforms.MatchComparer, wrapper func(h images.Handler) images.Handler) error {
 
 	var m sync.Mutex
@@ -213,20 +212,18 @@ func PushContent(ctx context.Context, pusher Pusher, desc ocispec.Descriptor, st
 	indexStack := []ocispec.Descriptor{}
 
 	filterHandler := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest:
+		if images.IsManifestType(desc.MediaType) {
 			m.Lock()
 			manifests = append(manifests, desc)
 			m.Unlock()
 			return nil, images.ErrStopHandler
-		case images.MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex:
+		} else if images.IsIndexType(desc.MediaType) {
 			m.Lock()
 			indexStack = append(indexStack, desc)
 			m.Unlock()
 			return nil, images.ErrStopHandler
-		default:
-			return nil, nil
 		}
+		return nil, nil
 	})
 
 	pushHandler := PushHandler(pusher, store)
@@ -234,7 +231,7 @@ func PushContent(ctx context.Context, pusher Pusher, desc ocispec.Descriptor, st
 	platformFilterhandler := images.FilterPlatforms(images.ChildrenHandler(store), platform)
 
 	var handler images.Handler
-	if m, ok := store.(content.Manager); ok {
+	if m, ok := store.(content.InfoProvider); ok {
 		annotateHandler := annotateDistributionSourceHandler(platformFilterhandler, m)
 		handler = images.Handlers(annotateHandler, filterHandler, pushHandler)
 	} else {
@@ -317,50 +314,56 @@ func FilterManifestByPlatformHandler(f images.HandlerFunc, m platforms.Matcher) 
 			return children, nil
 		}
 
-		var descs []ocispec.Descriptor
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest:
-			if m.Match(*desc.Platform) {
-				descs = children
-			} else {
-				for _, child := range children {
-					if child.MediaType == images.MediaTypeDockerSchema2Config ||
-						child.MediaType == ocispec.MediaTypeImageConfig {
-
-						descs = append(descs, child)
-					}
+		if images.IsManifestType(desc.MediaType) && !m.Match(*desc.Platform) {
+			var descs []ocispec.Descriptor
+			for _, child := range children {
+				if images.IsConfigType(child.MediaType) {
+					descs = append(descs, child)
 				}
 			}
-		default:
-			descs = children
+			return descs, nil
 		}
-		return descs, nil
+		return children, nil
 	}
 }
 
 // annotateDistributionSourceHandler add distribution source label into
 // annotation of config or blob descriptor.
-func annotateDistributionSourceHandler(f images.HandlerFunc, manager content.Manager) images.HandlerFunc {
+func annotateDistributionSourceHandler(f images.HandlerFunc, provider content.InfoProvider) images.HandlerFunc {
 	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		children, err := f(ctx, desc)
 		if err != nil {
 			return nil, err
 		}
 
-		// only add distribution source for the config or blob data descriptor
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest,
-			images.MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex:
-		default:
+		// Distribution source is only used for config or blob but may be inherited from
+		// a manifest or manifest list
+		if !images.IsManifestType(desc.MediaType) && !images.IsIndexType(desc.MediaType) {
 			return children, nil
 		}
+
+		// parentInfo can be used to inherit info for non-existent blobs
+		var parentInfo *content.Info
 
 		for i := range children {
 			child := children[i]
 
-			info, err := manager.Info(ctx, child.Digest)
+			info, err := provider.Info(ctx, child.Digest)
 			if err != nil {
-				return nil, err
+				if !errdefs.IsNotFound(err) {
+					return nil, err
+				}
+				if parentInfo == nil {
+					pi, err := provider.Info(ctx, desc.Digest)
+					if err != nil {
+						return nil, err
+					}
+					parentInfo = &pi
+				}
+				// Blob may not exist locally, annotate with parent labels for cross repo
+				// mount or fetch. Parent sources may apply to all children since most
+				// registries enforce that children exist before the manifests.
+				info = *parentInfo
 			}
 
 			for k, v := range info.Labels {

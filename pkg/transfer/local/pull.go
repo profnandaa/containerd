@@ -24,12 +24,13 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/pkg/transfer"
 	"github.com/containerd/containerd/pkg/unpack"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sirupsen/logrus"
 )
 
 func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetcher, is transfer.ImageStorer, tops *transfer.Config) error {
@@ -52,6 +53,32 @@ func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetch
 	if desc.MediaType == images.MediaTypeDockerSchema1Manifest {
 		// Explicitly call out schema 1 as deprecated and not supported
 		return fmt.Errorf("schema 1 image manifests are no longer supported: %w", errdefs.ErrInvalidArgument)
+	}
+
+	// Verify image before pulling.
+	for vfName, vf := range ts.verifiers {
+		log := log.G(ctx).WithFields(logrus.Fields{
+			"name":     name,
+			"digest":   desc.Digest.String(),
+			"verifier": vfName,
+		})
+		log.Debug("Verifying image pull")
+
+		jdg, err := vf.VerifyImage(ctx, name, desc)
+		if err != nil {
+			log.WithError(err).Error("No judgement received from verifier")
+			return fmt.Errorf("blocking pull of %v with digest %v: image verifier %v returned error: %w", name, desc.Digest.String(), vfName, err)
+		}
+		log = log.WithFields(logrus.Fields{
+			"ok":     jdg.OK,
+			"reason": jdg.Reason,
+		})
+
+		if !jdg.OK {
+			log.Warn("Image verifier blocked pull")
+			return fmt.Errorf("image verifier %s blocked pull of %v with digest %v for reason: %v", vfName, name, desc.Digest.String(), jdg.Reason)
+		}
+		log.Debug("Image verifier allowed pull")
 	}
 
 	// TODO: Handle already exists
@@ -228,24 +255,22 @@ func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetch
 }
 
 func fetchHandler(ingester content.Ingester, fetcher remotes.Fetcher, pt *ProgressTracker) images.HandlerFunc {
-	return func(ctx context.Context, desc ocispec.Descriptor) (subdescs []ocispec.Descriptor, err error) {
+	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{
 			"digest":    desc.Digest,
 			"mediatype": desc.MediaType,
 			"size":      desc.Size,
 		}))
 
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema1Manifest:
+		if desc.MediaType == images.MediaTypeDockerSchema1Manifest {
 			return nil, fmt.Errorf("%v not supported", desc.MediaType)
-		default:
-			err := remotes.Fetch(ctx, ingester, fetcher, desc)
-			if errdefs.IsAlreadyExists(err) {
-				pt.MarkExists(desc)
-				return nil, nil
-			}
-			return nil, err
 		}
+		err := remotes.Fetch(ctx, ingester, fetcher, desc)
+		if errdefs.IsAlreadyExists(err) {
+			pt.MarkExists(desc)
+			return nil, nil
+		}
+		return nil, err
 	}
 }
 

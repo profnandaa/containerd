@@ -96,7 +96,10 @@ backports until the end of life date. They may also accept a wider range of
 patches than non-_LTS_ releases to support the longer term maintainability of the
 branch, including library dependency, toolchain (including Go) and other version updates
 which are needed to ensure each release is built with fully supported dependencies and
-remains usable by containerd clients. There should be at least a 6-month overlap between
+remains usable by containerd clients. _LTS_ releases can also accept feature backports
+to support new Kubernetes releases. The default action has to be reject it though,
+for long-term stability. This is still negotiable when the feature is a hard dependency
+for a new release of Kubernetes. There should be at least a 6-month overlap between
 the end of life of an _LTS_ release and the initial release of a new _LTS_ release.
 Up to 6 months before the announced end of life of an _LTS_ branch, the branch may
 convert to a regular _Active_ release with stricter backport criteria.
@@ -348,9 +351,26 @@ We will do our best to not break compatibility in the tool in _patch_ releases.
 The daemon's configuration file, commonly located in `/etc/containerd/config.toml`
 is versioned and backwards compatible.  The `version` field in the config
 file specifies the config's version.  If no version number is specified inside
-the config file then it is assumed to be a version 1 config and parsed as such.
-Please use `version = 2` to enable version 2 config as version 1 has been
-deprecated.
+the config file then it is assumed to be a version `1` config and parsed as such.
+The latest version is `version = 2`. The `main` branch is being prepared to support
+the next config version `3`. The configuration is automatically migrated to the
+latest version on each startup, leaving the configuration file unchanged. To avoid
+the migration and optimize the daemon startup time, use `containerd config migrate`
+to output the configuration as the latest version. Version `1` is no longer deprecated
+and is supported by migration, however, it is recommended to use at least version `2`.
+
+Migrating a configuration to the latest version will limit the prior versions
+of containerd in which the configuration can be used. It is suggested not to
+migrate your configuration file until you are confident you do not need to
+quickly rollback your containerd version. Use the table of configuration
+versions to containerd releases to know the minimum version of containerd for
+each configuration version.
+
+| Configuration Version | Minimum containerd version |
+|-----------------------|----------------------------|
+| 1                     | v1.0.0                     |
+| 2                     | v1.3.0                     |
+| 3                     | v2.0.0                     |
 
 ### Not Covered
 
@@ -380,13 +400,13 @@ The deprecated features are shown in the following table:
 |----------------------------------------------------------------------------------|---------------------|----------------------------|------------------------------------------|
 | Runtime V1 API and implementation (`io.containerd.runtime.v1.linux`)             | containerd v1.4     | containerd v2.0 ✅         | Use `io.containerd.runc.v2`              |
 | Runc V1 implementation of Runtime V2 (`io.containerd.runc.v1`)                   | containerd v1.4     | containerd v2.0 ✅         | Use `io.containerd.runc.v2`              |
-| config.toml `version = 1`                                                        | containerd v1.5     | containerd v2.0 ✅         | Use config.toml `version = 2`            |
 | Built-in `aufs` snapshotter                                                      | containerd v1.5     | containerd v2.0 ✅         | Use `overlayfs` snapshotter              |
 | Container label `containerd.io/restart.logpath`                                  | containerd v1.5     | containerd v2.0 ✅         | Use `containerd.io/restart.loguri` label |
-| `cri-containerd-*.tar.gz` release bundles                                        | containerd v1.6     | containerd v2.0            | Use `containerd-*.tar.gz` bundles        |
+| `cri-containerd-*.tar.gz` release bundles                                        | containerd v1.6     | containerd v2.0 ✅         | Use `containerd-*.tar.gz` bundles        |
 | Pulling Schema 1 images (`application/vnd.docker.distribution.manifest.v1+json`) | containerd v1.7     | containerd v2.0            | Use Schema 2 or OCI images               |
 | CRI `v1alpha2`                                                                   | containerd v1.7     | containerd v2.0 ✅         | Use CRI `v1`                             |
-| Legacy CRI implementation of podsandbox support                                  | containerd v2.0     | containerd v2.1            | Disabled by default in 2.0 in favor of core sandboxed CRI plugin (use `DISABLE_CRI_SANDBOXES=1` to fallback to prior CRI podsandbox implementation) |
+| Legacy CRI implementation of podsandbox support                                  | containerd v2.0     | containerd v2.0 ✅         |                                          |
+| Go-Plugin library (`*.so`) as containerd runtime plugin                          | containerd v2.0     | containerd v2.1            | Use external plugins (proxy or binary)   |
 
 
 ### Deprecated config properties
@@ -458,4 +478,4 @@ more quickly.
 | [NRI in CRI Support](https://github.com/containerd/containerd/pull/6019)               | containerd v1.7 | containerd v2.0          |
 | [gRPC Shim](https://github.com/containerd/containerd/pull/8052)                        | containerd v1.7 | containerd v2.0          |
 | [CRI Runtime Specific Snapshotter](https://github.com/containerd/containerd/pull/6899) | containerd v1.7 | containerd v2.0          |
-| [CRI Support for User Namespaces](https://github.com/containerd/containerd/pull/7679)  | containerd v1.7 | containerd v2.0          |
+| [CRI Support for User Namespaces](./docs/user-namespaces/README.md)                    | containerd v1.7 | containerd v2.0          |

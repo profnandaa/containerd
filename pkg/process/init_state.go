@@ -25,7 +25,7 @@ import (
 
 	google_protobuf "github.com/containerd/containerd/protobuf/types"
 	runc "github.com/containerd/go-runc"
-	"github.com/sirupsen/logrus"
+	"github.com/containerd/log"
 )
 
 type initState interface {
@@ -341,7 +341,7 @@ func (s *pausedState) SetExited(status int) {
 	s.p.setExited(status)
 
 	if err := s.p.runtime.Resume(context.Background(), s.p.id); err != nil {
-		logrus.WithError(err).Error("resuming exited container from paused state")
+		log.L.WithError(err).Error("resuming exited container from paused state")
 	}
 
 	if err := s.transition("stopped"); err != nil {

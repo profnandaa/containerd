@@ -36,11 +36,11 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/log/logtest"
 	"github.com/containerd/containerd/namespaces"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	criserver "github.com/containerd/containerd/pkg/cri/server"
+	"github.com/containerd/log"
+	"github.com/containerd/log/logtest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -271,12 +271,12 @@ func testCRIImagePullTimeoutByNoDataTransferred(t *testing.T) {
 			},
 		})
 
-		assert.Equal(t, errors.Unwrap(err), context.Canceled, "[%v] expected canceled error, but got (%v)", idx, err)
-		assert.Equal(t, mirrorSrv.limiter.clearHitCircuitBreaker(), true, "[%v] expected to hit circuit breaker", idx)
+		assert.Equal(t, context.Canceled, errors.Unwrap(err), "[%v] expected canceled error, but got (%v)", idx, err)
+		assert.True(t, mirrorSrv.limiter.clearHitCircuitBreaker(), "[%v] expected to hit circuit breaker", idx)
 
 		// cleanup the temp data by sync delete
 		lid, ok := leases.FromContext(dctx)
-		assert.Equal(t, ok, true)
+		assert.True(t, ok)
 		err = cli.LeasesService().Delete(ctx, leases.Lease{ID: lid}, leases.SynchronousDelete)
 		assert.NoError(t, err)
 	}
@@ -459,6 +459,7 @@ func initLocalCRIPlugin(client *containerd.Client, tmpDir string, registryCfg cr
 			},
 			Registry:                 registryCfg,
 			ImagePullProgressTimeout: defaultImagePullProgressTimeout.String(),
+			StatsCollectPeriod:       10,
 		},
 		ContainerdRootDir: containerdRootDir,
 		RootDir:           filepath.Join(criWorkDir, "root"),

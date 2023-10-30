@@ -104,7 +104,7 @@ EOF
   config.vm.provision "install-golang", type: "shell", run: "once" do |sh|
     sh.upload_path = "/tmp/vagrant-install-golang"
     sh.env = {
-        'GO_VERSION': ENV['GO_VERSION'] || "1.21.0",
+        'GO_VERSION': ENV['GO_VERSION'] || "1.21.3",
     }
     sh.inline = <<~SHELL
         #!/usr/bin/env bash
@@ -272,7 +272,6 @@ EOF
         'GOTESTSUM_JUNITFILE': ENV['GOTESTSUM_JUNITFILE'],
         'GOTESTSUM_JSONFILE': ENV['GOTESTSUM_JSONFILE'],
         'GITHUB_WORKSPACE': '',
-        'DISABLE_CRI_SANDBOXES': ENV['DISABLE_CRI_SANDBOXES'],
     }
     sh.inline = <<~SHELL
         #!/usr/bin/env bash

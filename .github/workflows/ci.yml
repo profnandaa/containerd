@@ -9,7 +9,7 @@ on:
 env:
   # Go version we currently use to build containerd across all CI.
   # Note: don't forget to update `Binaries` step, as it contains the matrix of all supported Go versions.
-  GO_VERSION: "1.21.0"
+  GO_VERSION: "1.21.3"
 
 permissions: # added using https://github.com/step-security/secure-workflows
   contents: read
@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v3
       - uses: golangci/golangci-lint-action@v3
         with:
-          version: v1.52.2
+          version: v1.55.0
           skip-cache: true
           args: --timeout=8m
 
@@ -209,7 +209,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-22.04, macos-12, windows-2019, windows-2022]
-        go-version: ["1.20.7", "1.21.0"]
+        go-version: ["1.20.10", "1.21.3"]
     steps:
       - uses: actions/setup-go@v4
         with:
@@ -222,7 +222,8 @@ jobs:
       # builtin MinGW version leads to DLL loading errors during runtime.
       - name: Upgrade MinGW on Windows 2019
         if: matrix.os == 'windows-2019'
-        run: choco upgrade mingw
+        run: |
+          choco upgrade mingw --version=12.2.0.3042023
 
       - name: Make
         run: |
@@ -243,8 +244,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2019, windows-2022]
-        disable_cri_sandboxes: ["", "legacyCRI"]
+        os: [windows-2022] # windows-2019 is temporarily removed until mingw issue fixed
 
     defaults:
       run:
@@ -279,7 +279,8 @@ jobs:
       # builtin MinGW version leads to DLL loading errors during runtime.
       - name: Upgrade MinGW on Windows 2019
         if: matrix.os == 'windows-2019'
-        run: choco upgrade mingw
+        run: |
+          choco upgrade mingw --version=12.2.0.3042023
 
       - name: Binaries
         env:
@@ -335,7 +336,6 @@ jobs:
       - name: Integration 1
         env:
           CGO_ENABLED: 1
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-serial-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-serial-gotest.json
           EXTRA_TESTFLAGS: "-timeout=20m"
@@ -353,7 +353,6 @@ jobs:
           TESTFLAGS_PARALLEL: 1
           EXTRA_TESTFLAGS: "-short"
           CGO_ENABLED: 1
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-parallel-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-parallel-gotest.json
         run: mingw32-make.exe integration
@@ -366,14 +365,12 @@ jobs:
 
       - name: CRI Integration Test
         env:
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           TEST_IMAGE_LIST: ${{github.workspace}}/repolist.toml
         run: |
           make cri-integration
 
       - name: cri-tools critest
         env:
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           CRI_TEST_IMAGES: ${{github.workspace}}/cri-test-images.yaml
         shell: powershell
         run: |
@@ -409,7 +406,6 @@ jobs:
         runtime:
           - io.containerd.runc.v2
         runc: [runc, crun]
-        DISABLE_CRI_SANDBOXES: ["", "legacyCRI"]
 
     env:
       GOTEST: gotestsum --
@@ -464,7 +460,6 @@ jobs:
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
           RUNC_FLAVOR: ${{ matrix.runc }}
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-serial-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-serial-gotest.json
         run: |
@@ -483,7 +478,6 @@ jobs:
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
           RUNC_FLAVOR: ${{ matrix.runc }}
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
           GOTESTSUM_JUNITFILE: ${{github.workspace}}/test-integration-parallel-junit.xml
           GOTESTSUM_JSONFILE: ${{github.workspace}}/test-integration-parallel-gotest.json
         run: |
@@ -500,14 +494,12 @@ jobs:
       - name: CRI Integration Test
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
         run: |
           CONTAINERD_RUNTIME=$TEST_RUNTIME make cri-integration
 
       - name: cri-tools critest
         env:
           TEST_RUNTIME: ${{ matrix.runtime }}
-          DISABLE_CRI_SANDBOXES: ${{ matrix.disable_cri_sandboxes }}
         run: |
           sudo -E PATH=$PATH ./script/critest.sh "${{github.workspace}}/report"
 

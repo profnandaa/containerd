@@ -36,16 +36,16 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/log/logtest"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/plugins"
 	gogotypes "github.com/containerd/containerd/protobuf/types"
 	_ "github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/runtime/v2/runc/options"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/go-runc"
+	"github.com/containerd/log/logtest"
 	"github.com/containerd/typeurl/v2"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
@@ -172,7 +172,7 @@ func TestContainerStart(t *testing.T) {
 }
 
 func readShimPath(taskID string) (string, error) {
-	runtime := plugin.RuntimePluginV2.String() + ".task"
+	runtime := plugins.RuntimePluginV2.String() + ".task"
 	shimBinaryNamePath := filepath.Join(defaultState, runtime, testNamespace, taskID, "shim-binary-path")
 
 	shimPath, err := os.ReadFile(shimBinaryNamePath)
@@ -570,29 +570,44 @@ func TestContainerPids(t *testing.T) {
 	if taskPid < 1 {
 		t.Errorf("invalid task pid %d", taskPid)
 	}
+
 	processes, err := task.Pids(ctx)
-	switch runtime.GOOS {
-	case "windows":
-		// TODO: This is currently not implemented on windows
-	default:
-		if err != nil {
-			t.Fatal(err)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	l := len(processes)
+	// The point of this test is to see that we successfully can get all of
+	// the pids running in the container and they match the number expected,
+	// but for Windows this concept is a bit different. Windows containers
+	// essentially go through the usermode boot phase of the operating system,
+	// and have quite a few processes and system services running outside of
+	// the "init" process you specify. Because of this, there's not a great
+	// way to say "there should only be N processes running" like we can ensure
+	// for Linux based off the process we asked to run.
+	//
+	// With all that said, on Windows lets check that we're greater than one
+	// ("init" + system services/procs)
+	if runtime.GOOS == "windows" {
+		if l <= 1 {
+			t.Errorf("expected more than one process but received %d", l)
 		}
+	} else {
 		// 2 processes, 1 for sh and one for sleep
-		if l := len(processes); l != 2 {
+		if l != 2 {
 			t.Errorf("expected 2 process but received %d", l)
 		}
+	}
 
-		var found bool
-		for _, p := range processes {
-			if p.Pid == taskPid {
-				found = true
-				break
-			}
+	var found bool
+	for _, p := range processes {
+		if p.Pid == taskPid {
+			found = true
+			break
 		}
-		if !found {
-			t.Errorf("pid %d must be in %+v", taskPid, processes)
-		}
+	}
+	if !found {
+		t.Errorf("pid %d must be in %+v", taskPid, processes)
 	}
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		select {
