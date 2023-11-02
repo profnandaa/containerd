@@ -32,15 +32,15 @@ import (
 	"go.opentelemetry.io/otel"
 	exec "golang.org/x/sys/execabs"
 
-	. "github.com/containerd/containerd"
-	"github.com/containerd/containerd/defaults"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	imagelist "github.com/containerd/containerd/integration/images"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/pkg/testutil"
-	"github.com/containerd/containerd/platforms"
+	. "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/defaults"
+	"github.com/containerd/containerd/v2/errdefs"
+	"github.com/containerd/containerd/v2/images"
+	imagelist "github.com/containerd/containerd/v2/integration/images"
+	"github.com/containerd/containerd/v2/leases"
+	"github.com/containerd/containerd/v2/namespaces"
+	"github.com/containerd/containerd/v2/pkg/testutil"
+	"github.com/containerd/containerd/v2/platforms"
 	"github.com/containerd/log"
 )
 
@@ -189,7 +189,7 @@ func TestMain(m *testing.M) {
 	os.Exit(status)
 }
 
-func newClient(t testing.TB, address string, opts ...ClientOpt) (*Client, error) {
+func newClient(t testing.TB, address string, opts ...Opt) (*Client, error) {
 	if testing.Short() {
 		t.Skip()
 	}

@@ -21,9 +21,9 @@ package fuzz
 import (
 	fuzz "github.com/AdaLogics/go-fuzz-headers"
 
-	"github.com/containerd/containerd"
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
-	"github.com/containerd/containerd/pkg/cri/server"
+	containerd "github.com/containerd/containerd/v2/client"
+	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
+	"github.com/containerd/containerd/v2/pkg/cri/server"
 )
 
 func FuzzCRIServer(data []byte) int {

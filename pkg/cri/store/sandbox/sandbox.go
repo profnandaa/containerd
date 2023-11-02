@@ -19,13 +19,13 @@ package sandbox
 import (
 	"sync"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/pkg/cri/store"
-	"github.com/containerd/containerd/pkg/cri/store/label"
-	"github.com/containerd/containerd/pkg/cri/store/stats"
-	"github.com/containerd/containerd/pkg/netns"
-	"github.com/containerd/containerd/pkg/truncindex"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/errdefs"
+	"github.com/containerd/containerd/v2/pkg/cri/store"
+	"github.com/containerd/containerd/v2/pkg/cri/store/label"
+	"github.com/containerd/containerd/v2/pkg/cri/store/stats"
+	"github.com/containerd/containerd/v2/pkg/netns"
+	"github.com/containerd/containerd/v2/pkg/truncindex"
 )
 
 // Sandbox contains all resources associated with the sandbox. All methods to

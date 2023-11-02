@@ -21,9 +21,9 @@ package client
 import (
 	"testing"
 
-	. "github.com/containerd/containerd"
-	"github.com/containerd/containerd/integration/images"
-	"github.com/containerd/containerd/platforms"
+	. "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/integration/images"
+	"github.com/containerd/containerd/v2/platforms"
 )
 
 var (

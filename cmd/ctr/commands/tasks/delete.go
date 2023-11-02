@@ -19,9 +19,9 @@ package tasks
 import (
 	gocontext "context"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/cmd/ctr/commands"
+	"github.com/containerd/containerd/v2/cio"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/cmd/ctr/commands"
 	"github.com/containerd/log"
 	"github.com/urfave/cli"
 )
