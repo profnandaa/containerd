@@ -196,7 +196,7 @@ See the header of [`go.mod`](https://github.com/containerd/containerd/blob/main/
 
 ### Connecting to containerd
 
-We will start a new `main.go` file and import the containerd root package that contains the client.
+We will start a new `main.go` file and import the containerd client package.
 
 
 ```go
@@ -205,7 +205,7 @@ package main
 import (
 	"log"
 
-	"github.com/containerd/containerd"
+	containerd "github.com/containerd/containerd/v2/client"
 )
 
 func main() {
@@ -259,8 +259,8 @@ import (
         "context"
         "log"
 
-        "github.com/containerd/containerd"
-        "github.com/containerd/containerd/namespaces"
+        containerd "github.com/containerd/containerd/v2/client"
+        "github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
 func main() {
@@ -334,9 +334,9 @@ import (
         "context"
         "log"
 
-        "github.com/containerd/containerd"
-        "github.com/containerd/containerd/oci"
-        "github.com/containerd/containerd/namespaces"
+        containerd "github.com/containerd/containerd/v2/client"
+        "github.com/containerd/containerd/v2/pkg/namespaces"
+        "github.com/containerd/containerd/v2/pkg/oci"
 )
 
 func main() {
@@ -481,10 +481,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
 func main() {
@@ -533,7 +533,7 @@ func redisExample() error {
 	// make sure we wait before calling start
 	exitStatusC, err := task.Wait(ctx)
 	if err != nil {
-		fmt.Println(err)
+		return err
 	}
 
 	// call start on the task to execute the redis server

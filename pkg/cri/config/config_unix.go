@@ -19,15 +19,29 @@
 package config
 
 import (
-	"time"
-
-	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/defaults"
 	"github.com/pelletier/go-toml/v2"
-	"k8s.io/kubelet/pkg/cri/streaming"
 )
 
-// DefaultConfig returns default configurations of cri plugin.
-func DefaultConfig() PluginConfig {
+func DefaultImageConfig() ImageConfig {
+	return ImageConfig{
+		Snapshotter:                defaults.DefaultSnapshotter,
+		DisableSnapshotAnnotations: true,
+		MaxConcurrentDownloads:     3,
+		ImageDecryption: ImageDecryption{
+			KeyModel: KeyModelNode,
+		},
+		PinnedImages: map[string]string{
+			"sandbox": DefaultSandboxImage,
+		},
+		ImagePullProgressTimeout: defaultImagePullProgressTimeoutDuration.String(),
+		ImagePullWithSyncFs:      false,
+		StatsCollectPeriod:       10,
+	}
+}
+
+// DefaultRuntimeConfig returns default configurations of cri plugin.
+func DefaultRuntimeConfig() RuntimeConfig {
 	defaultRuncV2Opts := `
 	# NoNewKeyring disables new keyring for the container.
 	NoNewKeyring = false
@@ -56,7 +70,7 @@ func DefaultConfig() PluginConfig {
 	var m map[string]interface{}
 	toml.Unmarshal([]byte(defaultRuncV2Opts), &m)
 
-	return PluginConfig{
+	return RuntimeConfig{
 		CniConfig: CniConfig{
 			NetworkPluginBinDir:        "/opt/cni/bin",
 			NetworkPluginConfDir:       "/etc/cni/net.d",
@@ -65,7 +79,6 @@ func DefaultConfig() PluginConfig {
 			NetworkPluginConfTemplate:  "",
 		},
 		ContainerdConfig: ContainerdConfig{
-			Snapshotter:        containerd.DefaultSnapshotter,
 			DefaultRuntimeName: "runc",
 			Runtimes: map[string]Runtime{
 				"runc": {
@@ -74,33 +87,18 @@ func DefaultConfig() PluginConfig {
 					Sandboxer: string(ModePodSandbox),
 				},
 			},
-			DisableSnapshotAnnotations: true,
 		},
-		DisableTCPService:    true,
-		StreamServerAddress:  "127.0.0.1",
-		StreamServerPort:     "0",
-		StreamIdleTimeout:    streaming.DefaultConfig.StreamIdleTimeout.String(), // 4 hour
-		EnableSelinux:        false,
-		SelinuxCategoryRange: 1024,
-		EnableTLSStreaming:   false,
-		X509KeyPairStreaming: X509KeyPairStreaming{
-			TLSKeyFile:  "",
-			TLSCertFile: "",
-		},
-		SandboxImage:                     "registry.k8s.io/pause:3.9",
-		StatsCollectPeriod:               10,
+		EnableSelinux:                    false,
+		SelinuxCategoryRange:             1024,
 		MaxContainerLogLineSize:          16 * 1024,
-		MaxConcurrentDownloads:           3,
 		DisableProcMount:                 false,
 		TolerateMissingHugetlbController: true,
 		DisableHugetlbController:         true,
 		IgnoreImageDefinedVolumes:        false,
-		ImageDecryption: ImageDecryption{
-			KeyModel: KeyModelNode,
-		},
-		EnableCDI:                false,
-		CDISpecDirs:              []string{"/etc/cdi", "/var/run/cdi"},
-		ImagePullProgressTimeout: time.Minute.String(),
-		DrainExecSyncIOTimeout:   "0s",
+		EnableCDI:                        true,
+		CDISpecDirs:                      []string{"/etc/cdi", "/var/run/cdi"},
+		DrainExecSyncIOTimeout:           "0s",
+		EnableUnprivilegedPorts:          true,
+		EnableUnprivilegedICMP:           true,
 	}
 }

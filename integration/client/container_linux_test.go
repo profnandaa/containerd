@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -33,18 +34,17 @@ import (
 	"github.com/containerd/cgroups/v3"
 	"github.com/containerd/cgroups/v3/cgroup1"
 	cgroupsv2 "github.com/containerd/cgroups/v3/cgroup2"
-	"github.com/containerd/containerd/v2/cio"
 	. "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/errdefs"
-	"github.com/containerd/containerd/v2/oci"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/runtime/v2/runc/options"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/containerd/v2/pkg/sys"
 	"github.com/containerd/containerd/v2/plugins"
-	"github.com/containerd/containerd/v2/runtime/v2/runc/options"
-	"github.com/containerd/containerd/v2/sys"
+	"github.com/containerd/errdefs"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
-	exec "golang.org/x/sys/execabs"
 	"golang.org/x/sys/unix"
 )
 
@@ -1447,6 +1447,7 @@ func TestIssue9103(t *testing.T) {
 	for idx, tc := range []struct {
 		desc           string
 		cntrOpts       []NewContainerOpts
+		bakingFn       func(ctx context.Context, t *testing.T, task Task)
 		expectedStatus ProcessStatus
 	}{
 		{
@@ -1456,6 +1457,7 @@ func TestIssue9103(t *testing.T) {
 					withProcessArgs("sleep", "30"),
 				),
 			},
+			bakingFn:       func(context.Context, *testing.T, Task) {},
 			expectedStatus: Created,
 		},
 		{
@@ -1470,6 +1472,17 @@ func TestIssue9103(t *testing.T) {
 				WithRuntime(client.Runtime(), &options.Options{
 					BinaryName: "runc-fp",
 				}),
+			},
+			bakingFn: func(ctx context.Context, t *testing.T, task Task) {
+				waitCh, err := task.Wait(ctx)
+				require.NoError(t, err)
+
+				select {
+				case <-time.After(30 * time.Second):
+					t.Fatal("timeout")
+				case e := <-waitCh:
+					require.NoError(t, e.Error())
+				}
 			},
 			expectedStatus: Stopped,
 		},
@@ -1490,9 +1503,11 @@ func TestIssue9103(t *testing.T) {
 
 			defer task.Delete(ctx, WithProcessKill)
 
+			tc.bakingFn(ctx, t, task)
+
 			status, err := task.Status(ctx)
 			require.NoError(t, err)
-			require.Equal(t, status.Status, tc.expectedStatus)
+			require.Equal(t, tc.expectedStatus, status.Status)
 		})
 	}
 }

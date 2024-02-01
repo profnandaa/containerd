@@ -19,15 +19,28 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"time"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"k8s.io/kubelet/pkg/cri/streaming"
+	"github.com/containerd/containerd/v2/defaults"
 )
 
-// DefaultConfig returns default configurations of cri plugin.
-func DefaultConfig() PluginConfig {
-	return PluginConfig{
+func DefaultImageConfig() ImageConfig {
+	return ImageConfig{
+		Snapshotter:            defaults.DefaultSnapshotter,
+		StatsCollectPeriod:     10,
+		MaxConcurrentDownloads: 3,
+		ImageDecryption: ImageDecryption{
+			KeyModel: KeyModelNode,
+		},
+		PinnedImages: map[string]string{
+			"sandbox": DefaultSandboxImage,
+		},
+		ImagePullProgressTimeout: defaultImagePullProgressTimeoutDuration.String(),
+	}
+}
+
+// DefaultRuntimeConfig returns default configurations of cri plugin.
+func DefaultRuntimeConfig() RuntimeConfig {
+	return RuntimeConfig{
 		CniConfig: CniConfig{
 			NetworkPluginBinDir:        filepath.Join(os.Getenv("ProgramFiles"), "containerd", "cni", "bin"),
 			NetworkPluginConfDir:       filepath.Join(os.Getenv("ProgramFiles"), "containerd", "cni", "conf"),
@@ -36,7 +49,6 @@ func DefaultConfig() PluginConfig {
 			NetworkPluginConfTemplate:  "",
 		},
 		ContainerdConfig: ContainerdConfig{
-			Snapshotter:        containerd.DefaultSnapshotter,
 			DefaultRuntimeName: "runhcs-wcow-process",
 			Runtimes: map[string]Runtime{
 				"runhcs-wcow-process": {
@@ -65,26 +77,10 @@ func DefaultConfig() PluginConfig {
 				},
 			},
 		},
-		DisableTCPService:   true,
-		StreamServerAddress: "127.0.0.1",
-		StreamServerPort:    "0",
-		StreamIdleTimeout:   streaming.DefaultConfig.StreamIdleTimeout.String(), // 4 hour
-		EnableTLSStreaming:  false,
-		X509KeyPairStreaming: X509KeyPairStreaming{
-			TLSKeyFile:  "",
-			TLSCertFile: "",
-		},
-		SandboxImage:              "registry.k8s.io/pause:3.9",
-		StatsCollectPeriod:        10,
 		MaxContainerLogLineSize:   16 * 1024,
-		MaxConcurrentDownloads:    3,
 		IgnoreImageDefinedVolumes: false,
 		// TODO(windows): Add platform specific config, so that most common defaults can be shared.
 
-		ImageDecryption: ImageDecryption{
-			KeyModel: KeyModelNode,
-		},
-		ImagePullProgressTimeout: time.Minute.String(),
-		DrainExecSyncIOTimeout:   "0s",
+		DrainExecSyncIOTimeout: "0s",
 	}
 }

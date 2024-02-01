@@ -26,12 +26,12 @@ import (
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/containerd/containerd/v2/api/services/tasks/v1"
 	"github.com/containerd/containerd/v2/api/types"
-	"github.com/containerd/containerd/v2/errdefs"
 	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
 	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
 	"github.com/containerd/containerd/v2/pkg/cri/store/stats"
 	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
 	"github.com/containerd/containerd/v2/protobuf"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -121,7 +121,7 @@ func (c *criService) toPodSandboxStats(sandbox sandboxstore.Sandbox, statsMap ma
 		return nil, nil, fmt.Errorf("failed to find container metric for pod with id %s", sandbox.ID)
 	}
 
-	ociRuntime, err := c.getSandboxRuntime(sandbox.Config, sandbox.RuntimeHandler)
+	ociRuntime, err := c.config.GetSandboxRuntime(sandbox.Config, sandbox.RuntimeHandler)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get runtimeHandler %q: %w", sandbox.RuntimeHandler, err)
 	}

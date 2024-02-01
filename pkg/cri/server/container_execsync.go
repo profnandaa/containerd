@@ -24,10 +24,10 @@ import (
 	"syscall"
 	"time"
 
-	containerdio "github.com/containerd/containerd/v2/cio"
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/errdefs"
-	"github.com/containerd/containerd/v2/oci"
+	containerdio "github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"k8s.io/client-go/tools/remotecommand"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -146,6 +146,8 @@ func (c *criService) execInternal(ctx context.Context, container containerd.Cont
 	}
 
 	pspec.Args = opts.cmd
+	// CommandLine may already be set on the container's spec, but we want to only use Args here.
+	pspec.CommandLine = ""
 
 	if opts.stdout == nil {
 		opts.stdout = cio.NewDiscardLogger()
@@ -291,7 +293,7 @@ func drainExecSyncIO(ctx context.Context, execProcess containerd.Process, drainE
 	select {
 	case <-timerCh:
 	case <-attachDone:
-		log.G(ctx).Debugf("Stream pipe for exec process %q done", execProcess.ID())
+		log.G(ctx).Tracef("Stream pipe for exec process %q done", execProcess.ID())
 		return nil
 	}
 

@@ -27,22 +27,17 @@ import (
 	"strings"
 	"time"
 
-	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/containerd/typeurl/v2"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pelletier/go-toml/v2"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/errdefs"
-	clabels "github.com/containerd/containerd/v2/labels"
-	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
+	"github.com/containerd/containerd/v2/core/containers"
+	crilabels "github.com/containerd/containerd/v2/pkg/cri/labels"
 	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
 	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
-	runtimeoptions "github.com/containerd/containerd/v2/pkg/runtimeoptions/v1"
-	"github.com/containerd/containerd/v2/plugins"
-	runcoptions "github.com/containerd/containerd/v2/runtime/v2/runc/options"
+	clabels "github.com/containerd/containerd/v2/pkg/labels"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 )
 
@@ -71,23 +66,8 @@ const (
 	// Delimiter used to construct container/sandbox names.
 	nameDelimiter = "_"
 
-	// criContainerdPrefix is common prefix for cri-containerd
-	criContainerdPrefix = "io.cri-containerd"
-	// containerKindLabel is a label key indicating container is sandbox container or application container
-	containerKindLabel = criContainerdPrefix + ".kind"
-	// containerKindSandbox is a label value indicating container is sandbox container
-	containerKindSandbox = "sandbox"
-	// containerKindContainer is a label value indicating container is application container
-	containerKindContainer = "container"
-
-	// containerMetadataExtension is an extension name that identify metadata of container in CreateContainerRequest
-	containerMetadataExtension = criContainerdPrefix + ".container.metadata"
-
 	// defaultIfName is the default network interface for the pods
 	defaultIfName = "eth0"
-
-	// runtimeRunhcsV1 is the runtime type for runhcs.
-	runtimeRunhcsV1 = "io.containerd.runhcs.v1"
 
 	// devShm is the default path of /dev/shm.
 	devShm = "/dev/shm"
@@ -257,45 +237,8 @@ func buildLabels(configLabels, imageConfigLabels map[string]string, containerTyp
 	for k, v := range configLabels {
 		labels[k] = v
 	}
-	labels[containerKindLabel] = containerType
+	labels[crilabels.ContainerKindLabel] = containerType
 	return labels
-}
-
-// generateRuntimeOptions generates runtime options from cri plugin config.
-func generateRuntimeOptions(r criconfig.Runtime) (interface{}, error) {
-	if r.Options == nil {
-		return nil, nil
-	}
-
-	b, err := toml.Marshal(r.Options)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal TOML blob for runtime %q: %w", r.Type, err)
-	}
-
-	options := getRuntimeOptionsType(r.Type)
-	if err := toml.Unmarshal(b, options); err != nil {
-		return nil, err
-	}
-
-	// For generic configuration, if no config path specified (preserving old behavior), pass
-	// the whole TOML configuration section to the runtime.
-	if runtimeOpts, ok := options.(*runtimeoptions.Options); ok && runtimeOpts.ConfigPath == "" {
-		runtimeOpts.ConfigBody = b
-	}
-
-	return options, nil
-}
-
-// getRuntimeOptionsType gets empty runtime options by the runtime type name.
-func getRuntimeOptionsType(t string) interface{} {
-	switch t {
-	case plugins.RuntimeRuncV2:
-		return &runcoptions.Options{}
-	case runtimeRunhcsV1:
-		return &runhcsoptions.Options{}
-	default:
-		return &runtimeoptions.Options{}
-	}
 }
 
 // getRuntimeOptions get runtime options from container metadata.
@@ -452,13 +395,7 @@ func (c *criService) generateAndSendContainerEvent(ctx context.Context, containe
 		ContainersStatuses: containerStatuses,
 	}
 
-	// TODO(ruiwen-zhao): write events to a cache, storage, or increase the size of the channel
-	select {
-	case c.containerEventsChan <- event:
-	default:
-		containerEventsDroppedCount.Inc()
-		log.G(ctx).Debugf("containerEventsChan is full, discarding event %+v", event)
-	}
+	c.containerEventsQ.Send(event)
 }
 
 func (c *criService) getPodSandboxStatus(ctx context.Context, podSandboxID string) (*runtime.PodSandboxStatus, error) {

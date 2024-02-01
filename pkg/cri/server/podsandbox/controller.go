@@ -22,34 +22,70 @@ import (
 	"time"
 
 	"github.com/containerd/log"
+	"github.com/containerd/plugin"
+	"github.com/containerd/plugin/registry"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	eventtypes "github.com/containerd/containerd/v2/api/events"
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/errdefs"
-	"github.com/containerd/containerd/v2/oci"
+	"github.com/containerd/containerd/v2/core/sandbox"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
+	"github.com/containerd/containerd/v2/pkg/cri/constants"
+	"github.com/containerd/containerd/v2/pkg/cri/server/podsandbox/types"
 	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
-	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
 	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	osinterface "github.com/containerd/containerd/v2/pkg/os"
-	"github.com/containerd/containerd/v2/platforms"
-	"github.com/containerd/containerd/v2/plugin"
-	"github.com/containerd/containerd/v2/plugin/registry"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/containerd/v2/protobuf"
-	"github.com/containerd/containerd/v2/sandbox"
+	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 )
 
 func init() {
 	registry.Register(&plugin.Registration{
-		Type:     plugins.SandboxControllerPlugin,
-		ID:       "podsandbox",
-		Requires: []plugin.Type{},
+		Type: plugins.SandboxControllerPlugin,
+		ID:   "podsandbox",
+		Requires: []plugin.Type{
+			plugins.EventPlugin,
+			plugins.LeasePlugin,
+			plugins.SandboxStorePlugin,
+			plugins.CRIServicePlugin,
+			plugins.ServicePlugin,
+		},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			// register the global controller to containerd plugin manager,
-			// the global controller will be initialized when cri plugin is initializing
-			return &Controller{}, nil
+			client, err := containerd.New(
+				"",
+				containerd.WithDefaultNamespace(constants.K8sContainerdNamespace),
+				containerd.WithDefaultPlatform(platforms.Default()),
+				containerd.WithInMemoryServices(ic),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("unable to init client for podsandbox: %w", err)
+			}
+
+			// Get runtime service.
+			criRuntimePlugin, err := ic.GetByID(plugins.CRIServicePlugin, "runtime")
+			if err != nil {
+				return nil, fmt.Errorf("unable to load CRI runtime service plugin dependency: %w", err)
+			}
+			runtimeService := criRuntimePlugin.(RuntimeService)
+
+			// Get image service.
+			criImagePlugin, err := ic.GetByID(plugins.CRIServicePlugin, "images")
+			if err != nil {
+				return nil, fmt.Errorf("unable to load CRI image service plugin dependency: %w", err)
+			}
+
+			c := Controller{
+				client:         client,
+				config:         runtimeService.Config(),
+				os:             osinterface.RealOS{},
+				runtimeService: runtimeService,
+				imageService:   criImagePlugin.(ImageService),
+				store:          NewStore(),
+			}
+			return &c, nil
 		},
 	})
 }
@@ -61,12 +97,19 @@ type CRIService interface {
 	BackOffEvent(id string, event interface{})
 }
 
+// RuntimeService specifies dependencies to CRI runtime service.
+type RuntimeService interface {
+	Config() criconfig.Config
+	LoadOCISpec(string) (*oci.Spec, error)
+}
+
 // ImageService specifies dependencies to CRI image service.
 type ImageService interface {
-	runtime.ImageServiceServer
-
 	LocalResolve(refOrID string) (imagestore.Image, error)
 	GetImage(id string) (imagestore.Image, error)
+	PullImage(ctx context.Context, name string, creds func(string) (string, string, error), sc *runtime.PodSandboxConfig) (string, error)
+	RuntimeSnapshotter(ctx context.Context, ociRuntime criconfig.Runtime) string
+	PinnedImage(string) string
 }
 
 type Controller struct {
@@ -74,37 +117,22 @@ type Controller struct {
 	config criconfig.Config
 	// client is an instance of the containerd client
 	client *containerd.Client
+	// runtimeService is a dependency to CRI runtime service.
+	runtimeService RuntimeService
 	// imageService is a dependency to CRI image service.
 	imageService ImageService
-	// sandboxStore stores all resources associated with sandboxes.
-	sandboxStore *sandboxstore.Store
 	// os is an interface for all required os operations.
 	os osinterface.OS
 	// cri is CRI service that provides missing gaps needed by controller.
 	cri CRIService
-	// baseOCISpecs contains cached OCI specs loaded via `Runtime.BaseRuntimeSpec`
-	baseOCISpecs map[string]*oci.Spec
 
 	store *Store
 }
 
 func (c *Controller) Init(
-	config criconfig.Config,
-	client *containerd.Client,
-	sandboxStore *sandboxstore.Store,
-	os osinterface.OS,
 	cri CRIService,
-	imageService ImageService,
-	baseOCISpecs map[string]*oci.Spec,
 ) {
 	c.cri = cri
-	c.client = client
-	c.config = config
-	c.sandboxStore = sandboxStore
-	c.os = os
-	c.baseOCISpecs = baseOCISpecs
-	c.store = NewStore()
-	c.imageService = imageService
 }
 
 var _ sandbox.Controller = (*Controller)(nil)
@@ -114,63 +142,46 @@ func (c *Controller) Platform(_ctx context.Context, _sandboxID string) (platform
 }
 
 func (c *Controller) Wait(ctx context.Context, sandboxID string) (sandbox.ExitStatus, error) {
-	status := c.store.Get(sandboxID)
-	if status == nil {
+	podSandbox := c.store.Get(sandboxID)
+	if podSandbox == nil {
 		return sandbox.ExitStatus{}, fmt.Errorf("failed to get exit channel. %q", sandboxID)
+
 	}
-
-	exitStatus, exitedAt, err := c.waitSandboxExit(ctx, sandboxID, status.Waiter)
-
+	exit, err := podSandbox.Wait(ctx)
+	if err != nil {
+		return sandbox.ExitStatus{}, fmt.Errorf("failed to wait pod sandbox, %w", err)
+	}
 	return sandbox.ExitStatus{
-		ExitStatus: exitStatus,
-		ExitedAt:   exitedAt,
+		ExitStatus: exit.ExitCode(),
+		ExitedAt:   exit.ExitTime(),
 	}, err
+
 }
 
-func (c *Controller) waitSandboxExit(ctx context.Context, id string, exitCh <-chan containerd.ExitStatus) (exitStatus uint32, exitedAt time.Time, err error) {
-	exitStatus = unknownExitCode
-	exitedAt = time.Now()
+func (c *Controller) waitSandboxExit(ctx context.Context, p *types.PodSandbox, exitCh <-chan containerd.ExitStatus) (exitStatus uint32, exitedAt time.Time, err error) {
 	select {
-	case exitRes := <-exitCh:
-		log.G(ctx).Debugf("received sandbox exit %+v", exitRes)
-
-		exitStatus, exitedAt, err = exitRes.Result()
+	case e := <-exitCh:
+		exitStatus, exitedAt, err = e.Result()
 		if err != nil {
-			log.G(ctx).WithError(err).Errorf("failed to get task exit status for %q", id)
+			log.G(ctx).WithError(err).Errorf("failed to get task exit status for %q", p.ID)
 			exitStatus = unknownExitCode
 			exitedAt = time.Now()
 		}
-
-		err = func() error {
-			dctx := ctrdutil.NamespacedContext()
-			dctx, dcancel := context.WithTimeout(dctx, handleEventTimeout)
-			defer dcancel()
-
-			sb, err := c.sandboxStore.Get(id)
-			if err == nil {
-				if err := handleSandboxExit(dctx, sb, &eventtypes.TaskExit{ExitStatus: exitStatus, ExitedAt: protobuf.ToTimestamp(exitedAt)}); err != nil {
-					return err
-				}
-				return nil
-			} else if !errdefs.IsNotFound(err) {
-				return fmt.Errorf("failed to get sandbox %s: %w", id, err)
-			}
-			return nil
-		}()
-		if err != nil {
-			log.G(ctx).WithError(err).Errorf("failed to handle sandbox TaskExit %s", id)
-			// Don't backoff, the caller is responsible for.
-			return
+		dctx := ctrdutil.NamespacedContext()
+		dctx, dcancel := context.WithTimeout(dctx, handleEventTimeout)
+		defer dcancel()
+		event := &eventtypes.TaskExit{ExitStatus: exitStatus, ExitedAt: protobuf.ToTimestamp(exitedAt)}
+		if cleanErr := handleSandboxTaskExit(dctx, p, event); cleanErr != nil {
+			c.cri.BackOffEvent(p.ID, e)
 		}
+		return
 	case <-ctx.Done():
-		return exitStatus, exitedAt, ctx.Err()
+		return unknownExitCode, time.Now(), ctx.Err()
 	}
-	return
 }
 
-// handleSandboxExit handles TaskExit event for sandbox.
-// TODO https://github.com/containerd/containerd/issues/7548
-func handleSandboxExit(ctx context.Context, sb sandboxstore.Sandbox, e *eventtypes.TaskExit) error {
+// handleSandboxTaskExit handles TaskExit event for sandbox.
+func handleSandboxTaskExit(ctx context.Context, sb *types.PodSandbox, e *eventtypes.TaskExit) error {
 	// No stream attached to sandbox container.
 	task, err := sb.Container.Task(ctx, nil)
 	if err != nil {
@@ -183,17 +194,7 @@ func handleSandboxExit(ctx context.Context, sb sandboxstore.Sandbox, e *eventtyp
 			if !errdefs.IsNotFound(err) {
 				return fmt.Errorf("failed to stop sandbox: %w", err)
 			}
-			// Move on to make sure container status is updated.
 		}
 	}
-	sb.Status.Update(func(status sandboxstore.Status) (sandboxstore.Status, error) {
-		status.State = sandboxstore.StateNotReady
-		status.Pid = 0
-		status.ExitStatus = e.ExitStatus
-		status.ExitedAt = e.ExitedAt.AsTime()
-		return status, nil
-	})
-	// Using channel to propagate the information of sandbox stop
-	sb.Stop()
 	return nil
 }

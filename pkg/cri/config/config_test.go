@@ -21,42 +21,47 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+
+	"github.com/containerd/containerd/v2/pkg/deprecation"
 )
 
 func TestValidateConfig(t *testing.T) {
 	for desc, test := range map[string]struct {
-		config      *PluginConfig
-		expectedErr string
-		expected    *PluginConfig
+		runtimeConfig      *RuntimeConfig
+		runtimeExpectedErr string
+		runtimeExpected    *RuntimeConfig
+		imageConfig        *ImageConfig
+		imageExpectedErr   string
+		imageExpected      *ImageConfig
+		serverConfig       *ServerConfig
+		serverExpectedErr  string
+		serverExpected     *ServerConfig
+		warnings           []deprecation.Warning
 	}{
 		"no default_runtime_name": {
-			config:      &PluginConfig{},
-			expectedErr: "`default_runtime_name` is empty",
+			runtimeConfig:      &RuntimeConfig{},
+			runtimeExpectedErr: "`default_runtime_name` is empty",
 		},
 		"no runtime[default_runtime_name]": {
-			config: &PluginConfig{
+			runtimeConfig: &RuntimeConfig{
 				ContainerdConfig: ContainerdConfig{
 					DefaultRuntimeName: RuntimeDefault,
 				},
 			},
-			expectedErr: "no corresponding runtime configured in `containerd.runtimes` for `containerd` `default_runtime_name = \"default\"",
+			runtimeExpectedErr: "no corresponding runtime configured in `containerd.runtimes` for `containerd` `default_runtime_name = \"default\"",
 		},
 
 		"deprecated auths": {
-			config: &PluginConfig{
+			runtimeConfig: &RuntimeConfig{
 				ContainerdConfig: ContainerdConfig{
 					DefaultRuntimeName: RuntimeDefault,
 					Runtimes: map[string]Runtime{
 						RuntimeDefault: {},
 					},
 				},
-				Registry: Registry{
-					Auths: map[string]AuthConfig{
-						"https://gcr.io": {Username: "test"},
-					},
-				},
 			},
-			expected: &PluginConfig{
+			runtimeExpected: &RuntimeConfig{
 				ContainerdConfig: ContainerdConfig{
 					DefaultRuntimeName: RuntimeDefault,
 					Runtimes: map[string]Runtime{
@@ -65,6 +70,15 @@ func TestValidateConfig(t *testing.T) {
 						},
 					},
 				},
+			},
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					Auths: map[string]AuthConfig{
+						"https://gcr.io": {Username: "test"},
+					},
+				},
+			},
+			imageExpected: &ImageConfig{
 				Registry: Registry{
 					Configs: map[string]RegistryConfig{
 						"gcr.io": {
@@ -78,31 +92,16 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 			},
+			warnings: []deprecation.Warning{deprecation.CRIRegistryAuths},
 		},
 		"invalid stream_idle_timeout": {
-			config: &PluginConfig{
+			serverConfig: &ServerConfig{
 				StreamIdleTimeout: "invalid",
-				ContainerdConfig: ContainerdConfig{
-					DefaultRuntimeName: RuntimeDefault,
-					Runtimes: map[string]Runtime{
-						RuntimeDefault: {
-							Type: "default",
-						},
-					},
-				},
 			},
-			expectedErr: "invalid stream idle timeout",
+			serverExpectedErr: "invalid stream idle timeout",
 		},
 		"conflicting mirror registry config": {
-			config: &PluginConfig{
-				ContainerdConfig: ContainerdConfig{
-					DefaultRuntimeName: RuntimeDefault,
-					Runtimes: map[string]Runtime{
-						RuntimeDefault: {
-							Type: "default",
-						},
-					},
-				},
+			imageConfig: &ImageConfig{
 				Registry: Registry{
 					ConfigPath: "/etc/containerd/conf.d",
 					Mirrors: map[string]Mirror{
@@ -110,10 +109,88 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 			},
-			expectedErr: "`mirrors` cannot be set when `config_path` is provided",
+			imageExpectedErr: "`mirrors` cannot be set when `config_path` is provided",
+		},
+		"deprecated mirrors": {
+			runtimeConfig: &RuntimeConfig{
+				ContainerdConfig: ContainerdConfig{
+					DefaultRuntimeName: RuntimeDefault,
+					Runtimes: map[string]Runtime{
+						RuntimeDefault: {},
+					},
+				},
+			},
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					Mirrors: map[string]Mirror{
+						"example.com": {},
+					},
+				},
+			},
+			runtimeExpected: &RuntimeConfig{
+				ContainerdConfig: ContainerdConfig{
+					DefaultRuntimeName: RuntimeDefault,
+					Runtimes: map[string]Runtime{
+						RuntimeDefault: {
+							Sandboxer: string(ModePodSandbox),
+						},
+					},
+				},
+			},
+			imageExpected: &ImageConfig{
+				Registry: Registry{
+					Mirrors: map[string]Mirror{
+						"example.com": {},
+					},
+				},
+			},
+			warnings: []deprecation.Warning{deprecation.CRIRegistryMirrors},
+		},
+		"deprecated configs": {
+			runtimeConfig: &RuntimeConfig{
+				ContainerdConfig: ContainerdConfig{
+					DefaultRuntimeName: RuntimeDefault,
+					Runtimes: map[string]Runtime{
+						RuntimeDefault: {},
+					},
+				},
+			},
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					Configs: map[string]RegistryConfig{
+						"gcr.io": {
+							Auth: &AuthConfig{
+								Username: "test",
+							},
+						},
+					},
+				},
+			},
+			runtimeExpected: &RuntimeConfig{
+				ContainerdConfig: ContainerdConfig{
+					DefaultRuntimeName: RuntimeDefault,
+					Runtimes: map[string]Runtime{
+						RuntimeDefault: {
+							Sandboxer: string(ModePodSandbox),
+						},
+					},
+				},
+			},
+			imageExpected: &ImageConfig{
+				Registry: Registry{
+					Configs: map[string]RegistryConfig{
+						"gcr.io": {
+							Auth: &AuthConfig{
+								Username: "test",
+							},
+						},
+					},
+				},
+			},
+			warnings: []deprecation.Warning{deprecation.CRIRegistryConfigs},
 		},
 		"privileged_without_host_devices_all_devices_allowed without privileged_without_host_devices": {
-			config: &PluginConfig{
+			runtimeConfig: &RuntimeConfig{
 				ContainerdConfig: ContainerdConfig{
 					DefaultRuntimeName: RuntimeDefault,
 					Runtimes: map[string]Runtime{
@@ -125,10 +202,10 @@ func TestValidateConfig(t *testing.T) {
 					},
 				},
 			},
-			expectedErr: "`privileged_without_host_devices_all_devices_allowed` requires `privileged_without_host_devices` to be enabled",
+			runtimeExpectedErr: "`privileged_without_host_devices_all_devices_allowed` requires `privileged_without_host_devices` to be enabled",
 		},
 		"invalid drain_exec_sync_io_timeout input": {
-			config: &PluginConfig{
+			runtimeConfig: &RuntimeConfig{
 				ContainerdConfig: ContainerdConfig{
 					DefaultRuntimeName: RuntimeDefault,
 					Runtimes: map[string]Runtime{
@@ -139,16 +216,93 @@ func TestValidateConfig(t *testing.T) {
 				},
 				DrainExecSyncIOTimeout: "10",
 			},
-			expectedErr: "invalid `drain_exec_sync_io_timeout`",
+			runtimeExpectedErr: "invalid `drain_exec_sync_io_timeout`",
 		},
 	} {
 		t.Run(desc, func(t *testing.T) {
-			err := ValidatePluginConfig(context.Background(), test.config)
-			if test.expectedErr != "" {
-				assert.Contains(t, err.Error(), test.expectedErr)
+			var warnings []deprecation.Warning
+			if test.runtimeConfig != nil {
+				w, err := ValidateRuntimeConfig(context.Background(), test.runtimeConfig)
+				if test.runtimeExpectedErr != "" {
+					assert.Contains(t, err.Error(), test.runtimeExpectedErr)
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, test.runtimeExpected, test.runtimeConfig)
+				}
+				warnings = append(warnings, w...)
+			}
+			if test.imageConfig != nil {
+				w, err := ValidateImageConfig(context.Background(), test.imageConfig)
+				if test.imageExpectedErr != "" {
+					assert.Contains(t, err.Error(), test.imageExpectedErr)
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, test.imageExpected, test.imageConfig)
+				}
+				warnings = append(warnings, w...)
+			}
+			if test.serverConfig != nil {
+				w, err := ValidateServerConfig(context.Background(), test.serverConfig)
+				if test.serverExpectedErr != "" {
+					assert.Contains(t, err.Error(), test.serverExpectedErr)
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, test.serverExpected, test.serverConfig)
+				}
+				warnings = append(warnings, w...)
+			}
+
+			if len(test.warnings) > 0 {
+				assert.ElementsMatch(t, test.warnings, warnings)
 			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, test.expected, test.config)
+				assert.Len(t, warnings, 0)
+			}
+		})
+	}
+}
+
+func TestHostAccessingSandbox(t *testing.T) {
+	privilegedContext := &runtime.PodSandboxConfig{
+		Linux: &runtime.LinuxPodSandboxConfig{
+			SecurityContext: &runtime.LinuxSandboxSecurityContext{
+				Privileged: true,
+			},
+		},
+	}
+	nonPrivilegedContext := &runtime.PodSandboxConfig{
+		Linux: &runtime.LinuxPodSandboxConfig{
+			SecurityContext: &runtime.LinuxSandboxSecurityContext{
+				Privileged: false,
+			},
+		},
+	}
+	hostNamespace := &runtime.PodSandboxConfig{
+		Linux: &runtime.LinuxPodSandboxConfig{
+			SecurityContext: &runtime.LinuxSandboxSecurityContext{
+				Privileged: false,
+				NamespaceOptions: &runtime.NamespaceOption{
+					Network: runtime.NamespaceMode_NODE,
+					Pid:     runtime.NamespaceMode_NODE,
+					Ipc:     runtime.NamespaceMode_NODE,
+				},
+			},
+		},
+	}
+	tests := []struct {
+		name   string
+		config *runtime.PodSandboxConfig
+		want   bool
+	}{
+		{"Security Context is nil", nil, false},
+		{"Security Context is privileged", privilegedContext, false},
+		{"Security Context is not privileged", nonPrivilegedContext, false},
+		{"Security Context namespace host access", hostNamespace, true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hostAccessingSandbox(tt.config); got != tt.want {
+				t.Errorf("hostAccessingSandbox() = %v, want %v", got, tt.want)
 			}
 		})
 	}

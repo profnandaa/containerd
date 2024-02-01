@@ -26,6 +26,7 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
+	"github.com/containerd/errdefs"
 )
 
 // StopPodSandbox stops the sandbox. If there are any running containers in the
@@ -68,13 +69,18 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 	state := sandbox.Status.Get().State
 	if state == sandboxstore.StateReady || state == sandboxstore.StateUnknown {
 		// Use sandbox controller to stop sandbox
-		controller, err := c.getSandboxController(sandbox.Config, sandbox.RuntimeHandler)
+		controller, err := c.sandboxService.SandboxController(sandbox.Config, sandbox.RuntimeHandler)
 		if err != nil {
 			return fmt.Errorf("failed to get sandbox controller: %w", err)
 		}
 
 		if err := controller.Stop(ctx, id); err != nil {
-			return fmt.Errorf("failed to stop sandbox %q: %w", id, err)
+			// Log and ignore the error if controller already removed the sandbox
+			if errdefs.IsNotFound(err) {
+				log.G(ctx).Warnf("sandbox %q is not found when stopping it", id)
+			} else {
+				return fmt.Errorf("failed to stop sandbox %q: %w", id, err)
+			}
 		}
 	}
 

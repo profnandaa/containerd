@@ -25,19 +25,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
-	"github.com/containerd/containerd/v2/containers"
 	"github.com/containerd/containerd/v2/contrib/apparmor"
 	"github.com/containerd/containerd/v2/contrib/seccomp"
-	"github.com/containerd/containerd/v2/mount"
-	"github.com/containerd/containerd/v2/oci"
-	"github.com/containerd/containerd/v2/platforms"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/platforms"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
 
 	"github.com/containerd/containerd/v2/pkg/cap"
 	"github.com/containerd/containerd/v2/pkg/cri/annotations"
@@ -1680,23 +1680,24 @@ func TestPrivilegedDevices(t *testing.T) {
 }
 
 func TestBaseOCISpec(t *testing.T) {
-	c := newTestCRIService()
 	baseLimit := int64(100)
-	c.baseOCISpecs = map[string]*oci.Spec{
-		"/etc/containerd/cri-base.json": {
-			Process: &runtimespec.Process{
-				User: runtimespec.User{AdditionalGids: []uint32{9999}},
-				Capabilities: &runtimespec.LinuxCapabilities{
-					Permitted: []string{"CAP_SETUID"},
+	c := newTestCRIService(withRuntimeService(&fakeRuntimeService{
+		ocispecs: map[string]*oci.Spec{
+			"/etc/containerd/cri-base.json": {
+				Process: &runtimespec.Process{
+					User: runtimespec.User{AdditionalGids: []uint32{9999}},
+					Capabilities: &runtimespec.LinuxCapabilities{
+						Permitted: []string{"CAP_SETUID"},
+					},
 				},
-			},
-			Linux: &runtimespec.Linux{
-				Resources: &runtimespec.LinuxResources{
-					Memory: &runtimespec.LinuxMemory{Limit: &baseLimit}, // Will be overwritten by `getCreateContainerTestData`
+				Linux: &runtimespec.Linux{
+					Resources: &runtimespec.LinuxResources{
+						Memory: &runtimespec.LinuxMemory{Limit: &baseLimit}, // Will be overwritten by `getCreateContainerTestData`
+					},
 				},
 			},
 		},
-	}
+	}))
 
 	ociRuntime := config.Runtime{}
 	ociRuntime.BaseRuntimeSpec = "/etc/containerd/cri-base.json"

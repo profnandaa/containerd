@@ -27,10 +27,12 @@ import (
 	"time"
 
 	"github.com/containerd/go-cni"
+	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	sb "github.com/containerd/containerd/v2/core/sandbox"
 	"github.com/containerd/containerd/v2/pkg/cri/annotations"
 	"github.com/containerd/containerd/v2/pkg/cri/bandwidth"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
@@ -38,8 +40,6 @@ import (
 	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
 	"github.com/containerd/containerd/v2/pkg/cri/util"
 	"github.com/containerd/containerd/v2/pkg/netns"
-	sb "github.com/containerd/containerd/v2/sandbox"
-	"github.com/containerd/log"
 )
 
 func init() {
@@ -86,7 +86,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		sandboxInfo = sb.Sandbox{ID: id}
 	)
 
-	ociRuntime, err := c.getSandboxRuntime(config, r.GetRuntimeHandler())
+	ociRuntime, err := c.config.GetSandboxRuntime(config, r.GetRuntimeHandler())
 	if err != nil {
 		return nil, fmt.Errorf("unable to get OCI runtime for sandbox %q: %w", id, err)
 	}
@@ -96,7 +96,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 
 	runtimeStart := time.Now()
 	// Retrieve runtime options
-	runtimeOpts, err := generateRuntimeOptions(ociRuntime)
+	runtimeOpts, err := criconfig.GenerateRuntimeOptions(ociRuntime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate sandbox runtime options: %w", err)
 	}
@@ -120,7 +120,8 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 			RuntimeHandler: r.GetRuntimeHandler(),
 		},
 		sandboxstore.Status{
-			State: sandboxstore.StateUnknown,
+			State:     sandboxstore.StateUnknown,
+			CreatedAt: time.Now().UTC(),
 		},
 	)
 
@@ -239,7 +240,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		return nil, fmt.Errorf("unable to save sandbox %q to store: %w", id, err)
 	}
 
-	controller, err := c.getSandboxController(config, r.GetRuntimeHandler())
+	controller, err := c.sandboxService.SandboxController(config, r.GetRuntimeHandler())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox controller: %w", err)
 	}
@@ -255,7 +256,6 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 
 	ctrl, err := controller.Start(ctx, id)
 	if err != nil {
-		sandbox.Container, _ = c.client.LoadContainer(ctx, id)
 		var cerr podsandbox.CleanupErr
 		if errors.As(err, &cerr) {
 			cleanupErr = fmt.Errorf("failed to cleanup sandbox: %w", cerr)
@@ -422,7 +422,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	//
 	// TaskOOM from containerd may come before sandbox is added to store,
 	// but we don't care about sandbox TaskOOM right now, so it is fine.
-	c.eventMonitor.startSandboxExitMonitor(context.Background(), id, ctrl.Pid, exitCh)
+	c.eventMonitor.startSandboxExitMonitor(context.Background(), id, exitCh)
 
 	// Send CONTAINER_STARTED event with ContainerId equal to SandboxId.
 	c.generateAndSendContainerEvent(ctx, id, id, runtime.ContainerEventType_CONTAINER_STARTED_EVENT)
@@ -628,60 +628,6 @@ func selectPodIPs(ctx context.Context, configs []*cni.IPConfig, preference strin
 
 func ipString(ip *cni.IPConfig) string {
 	return ip.IP.String()
-}
-
-// untrustedWorkload returns true if the sandbox contains untrusted workload.
-func untrustedWorkload(config *runtime.PodSandboxConfig) bool {
-	return config.GetAnnotations()[annotations.UntrustedWorkload] == "true"
-}
-
-// hostAccessingSandbox returns true if the sandbox configuration
-// requires additional host access for the sandbox.
-func hostAccessingSandbox(config *runtime.PodSandboxConfig) bool {
-	securityContext := config.GetLinux().GetSecurityContext()
-
-	namespaceOptions := securityContext.GetNamespaceOptions()
-	if namespaceOptions.GetNetwork() == runtime.NamespaceMode_NODE ||
-		namespaceOptions.GetPid() == runtime.NamespaceMode_NODE ||
-		namespaceOptions.GetIpc() == runtime.NamespaceMode_NODE {
-		return true
-	}
-
-	return false
-}
-
-// getSandboxRuntime returns the runtime configuration for sandbox.
-// If the sandbox contains untrusted workload, runtime for untrusted workload will be returned,
-// or else default runtime will be returned.
-func (c *criService) getSandboxRuntime(config *runtime.PodSandboxConfig, runtimeHandler string) (criconfig.Runtime, error) {
-	if untrustedWorkload(config) {
-		// If the untrusted annotation is provided, runtimeHandler MUST be empty.
-		if runtimeHandler != "" && runtimeHandler != criconfig.RuntimeUntrusted {
-			return criconfig.Runtime{}, errors.New("untrusted workload with explicit runtime handler is not allowed")
-		}
-
-		//  If the untrusted workload is requesting access to the host/node, this request will fail.
-		//
-		//  Note: If the workload is marked untrusted but requests privileged, this can be granted, as the
-		// runtime may support this.  For example, in a virtual-machine isolated runtime, privileged
-		// is a supported option, granting the workload to access the entire guest VM instead of host.
-		// TODO(windows): Deprecate this so that we don't need to handle it for windows.
-		if hostAccessingSandbox(config) {
-			return criconfig.Runtime{}, errors.New("untrusted workload with host access is not allowed")
-		}
-
-		runtimeHandler = criconfig.RuntimeUntrusted
-	}
-
-	if runtimeHandler == "" {
-		runtimeHandler = c.config.ContainerdConfig.DefaultRuntimeName
-	}
-
-	handler, ok := c.config.ContainerdConfig.Runtimes[runtimeHandler]
-	if !ok {
-		return criconfig.Runtime{}, fmt.Errorf("no runtime for %q is configured", runtimeHandler)
-	}
-	return handler, nil
 }
 
 func logDebugCNIResult(ctx context.Context, sandboxID string, result *cni.Result) {

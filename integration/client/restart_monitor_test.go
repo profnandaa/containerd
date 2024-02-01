@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -32,13 +33,12 @@ import (
 
 	eventtypes "github.com/containerd/containerd/v2/api/events"
 	. "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/oci"
-	"github.com/containerd/containerd/v2/pkg/testutil"
-	"github.com/containerd/containerd/v2/runtime/restart"
-	srvconfig "github.com/containerd/containerd/v2/services/server/config"
+	srvconfig "github.com/containerd/containerd/v2/cmd/containerd/server/config"
+	"github.com/containerd/containerd/v2/core/runtime/restart"
+	"github.com/containerd/containerd/v2/internal/testutil"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/typeurl/v2"
 	"github.com/stretchr/testify/require"
-	exec "golang.org/x/sys/execabs"
 )
 
 func newDaemonWithConfig(t *testing.T, configTOML string) (*Client, *daemon, func()) {

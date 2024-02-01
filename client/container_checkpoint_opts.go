@@ -24,24 +24,20 @@ import (
 	"runtime"
 
 	tasks "github.com/containerd/containerd/v2/api/services/tasks/v1"
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/diff"
-	"github.com/containerd/containerd/v2/images"
-	"github.com/containerd/containerd/v2/platforms"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/diff"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/runtime/v2/runc/options"
+	"github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/containerd/v2/protobuf"
 	"github.com/containerd/containerd/v2/protobuf/proto"
-	"github.com/containerd/containerd/v2/rootfs"
-	"github.com/containerd/containerd/v2/runtime/v2/runc/options"
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-var (
-	// ErrCheckpointRWUnsupported is returned if the container runtime does not support checkpoint
-	ErrCheckpointRWUnsupported = errors.New("rw checkpoint is only supported on v2 runtimes")
-	// ErrMediaTypeNotFound returns an error when a media type in the manifest is unknown
-	ErrMediaTypeNotFound = errors.New("media type not found")
-)
+// ErrMediaTypeNotFound returns an error when a media type in the manifest is unknown
+var ErrMediaTypeNotFound = errors.New("media type not found")
 
 // CheckpointOpts are options to manage the checkpoint operation
 type CheckpointOpts func(context.Context, *Client, *containers.Container, *imagespec.Index, *options.CheckpointOptions) error

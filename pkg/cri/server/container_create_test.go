@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	ostesting "github.com/containerd/containerd/v2/pkg/os/testing"
-	"github.com/containerd/containerd/v2/platforms"
+	"github.com/containerd/platforms"
 
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
@@ -33,10 +33,10 @@ import (
 	"github.com/stretchr/testify/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/containerd/containerd/v2/oci"
 	"github.com/containerd/containerd/v2/pkg/cri/config"
 	"github.com/containerd/containerd/v2/pkg/cri/constants"
 	"github.com/containerd/containerd/v2/pkg/cri/opts"
+	"github.com/containerd/containerd/v2/pkg/oci"
 )
 
 var currentPlatform = platforms.DefaultSpec()
@@ -524,13 +524,14 @@ func TestContainerAnnotationPassthroughContainerSpec(t *testing.T) {
 }
 
 func TestBaseRuntimeSpec(t *testing.T) {
-	c := newTestCRIService()
-	c.baseOCISpecs = map[string]*oci.Spec{
-		"/etc/containerd/cri-base.json": {
-			Version:  "1.0.2",
-			Hostname: "old",
+	c := newTestCRIService(withRuntimeService(&fakeRuntimeService{
+		ocispecs: map[string]*oci.Spec{
+			"/etc/containerd/cri-base.json": {
+				Version:  "1.0.2",
+				Hostname: "old",
+			},
 		},
-	}
+	}))
 
 	out, err := c.runtimeSpec(
 		"id1",
@@ -546,8 +547,10 @@ func TestBaseRuntimeSpec(t *testing.T) {
 	assert.Equal(t, "new-domain", out.Domainname)
 
 	// Make sure original base spec not changed
-	assert.NotEqual(t, out, c.baseOCISpecs["/etc/containerd/cri-base.json"])
-	assert.Equal(t, c.baseOCISpecs["/etc/containerd/cri-base.json"].Hostname, "old")
+	spec, err := c.LoadOCISpec("/etc/containerd/cri-base.json")
+	assert.NoError(t, err)
+	assert.NotEqual(t, out, spec)
+	assert.Equal(t, spec.Hostname, "old")
 
 	assert.Equal(t, filepath.Join("/", constants.K8sContainerdNamespace, "id1"), out.Linux.CgroupsPath)
 }

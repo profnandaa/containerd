@@ -25,17 +25,17 @@ import (
 	introspectionapi "github.com/containerd/containerd/v2/api/services/introspection/v1"
 	namespacesapi "github.com/containerd/containerd/v2/api/services/namespaces/v1"
 	"github.com/containerd/containerd/v2/api/services/tasks/v1"
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/content"
-	"github.com/containerd/containerd/v2/images"
-	"github.com/containerd/containerd/v2/leases"
-	"github.com/containerd/containerd/v2/namespaces"
-	"github.com/containerd/containerd/v2/plugin"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/sandbox"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/plugins"
-	"github.com/containerd/containerd/v2/sandbox"
-	srv "github.com/containerd/containerd/v2/services"
-	"github.com/containerd/containerd/v2/services/introspection"
-	"github.com/containerd/containerd/v2/snapshots"
+	srv "github.com/containerd/containerd/v2/plugins/services"
+	"github.com/containerd/containerd/v2/plugins/services/introspection"
+	"github.com/containerd/plugin"
 )
 
 type services struct {
@@ -83,16 +83,6 @@ func WithSnapshotters(snapshotters map[string]snapshots.Snapshotter) ServicesOpt
 		s.snapshotters = make(map[string]snapshots.Snapshotter)
 		for n, sn := range snapshotters {
 			s.snapshotters[n] = sn
-		}
-	}
-}
-
-// WithSandboxers sets the sandbox controllers.
-func WithSandboxers(sandboxers map[string]sandbox.Controller) ServicesOpt {
-	return func(s *services) {
-		s.sandboxers = make(map[string]sandbox.Controller)
-		for n, sn := range sandboxers {
-			s.sandboxers[n] = sn
 		}
 	}
 }
@@ -197,7 +187,7 @@ func WithInMemoryServices(ic *plugin.InitContext) Opt {
 				return WithSandboxStore(i.(sandbox.Store))
 			},
 		} {
-			i, err := ic.Get(t)
+			i, err := ic.GetSingle(t)
 			if err != nil {
 				return fmt.Errorf("failed to get %q plugin: %w", t, err)
 			}
@@ -218,9 +208,6 @@ func WithInMemoryServices(ic *plugin.InitContext) Opt {
 			srv.SnapshotsService: func(s interface{}) ServicesOpt {
 				return WithSnapshotters(s.(map[string]snapshots.Snapshotter))
 			},
-			srv.SandboxControllersService: func(s interface{}) ServicesOpt {
-				return WithSandboxers(s.(map[string]sandbox.Controller))
-			},
 			srv.ContainersService: func(s interface{}) ServicesOpt {
 				return WithContainerClient(s.(containersapi.ContainersClient))
 			},
@@ -237,16 +224,9 @@ func WithInMemoryServices(ic *plugin.InitContext) Opt {
 				return WithIntrospectionClient(s.(introspectionapi.IntrospectionClient))
 			},
 		} {
-			p := plugins[s]
-			if p == nil {
-				return fmt.Errorf("service %q not found", s)
-			}
-			i, err := p.Instance()
-			if err != nil {
-				return fmt.Errorf("failed to get instance of service %q: %w", s, err)
-			}
+			i := plugins[s]
 			if i == nil {
-				return fmt.Errorf("instance of service %q not found", s)
+				return fmt.Errorf("service %q not found", s)
 			}
 			opts = append(opts, fn(i))
 		}
@@ -255,6 +235,21 @@ func WithInMemoryServices(ic *plugin.InitContext) Opt {
 		for _, o := range opts {
 			o(c.services)
 		}
+		return nil
+	}
+}
+
+func WithInMemorySandboxControllers(ic *plugin.InitContext) Opt {
+	return func(c *clientOpts) error {
+		sandboxers, err := ic.GetByType(plugins.SandboxControllerPlugin)
+		if err != nil {
+			return err
+		}
+		sc := make(map[string]sandbox.Controller)
+		for name, p := range sandboxers {
+			sc[name] = p.(sandbox.Controller)
+		}
+		c.services.sandboxers = sc
 		return nil
 	}
 }

@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 
-	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
+	"github.com/containerd/log"
 	"github.com/containerd/nri"
 	v1 "github.com/containerd/nri/types/v1"
 	"github.com/containerd/typeurl/v2"
@@ -29,17 +29,18 @@ import (
 	"github.com/opencontainers/selinux/go-selinux"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	containerdio "github.com/containerd/containerd/v2/cio"
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/errdefs"
-	"github.com/containerd/containerd/v2/pkg/cri/annotations"
+	"github.com/containerd/containerd/v2/core/sandbox"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	containerdio "github.com/containerd/containerd/v2/pkg/cio"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
+	crilabels "github.com/containerd/containerd/v2/pkg/cri/labels"
 	customopts "github.com/containerd/containerd/v2/pkg/cri/opts"
+	"github.com/containerd/containerd/v2/pkg/cri/server/podsandbox/types"
+	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
 	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
 	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
-	"github.com/containerd/containerd/v2/sandbox"
-	"github.com/containerd/containerd/v2/snapshots"
-	"github.com/containerd/log"
+	"github.com/containerd/errdefs"
 )
 
 func init() {
@@ -63,26 +64,25 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 			retErr = errors.Join(retErr, CleanupErr{cleanupErr})
 		}
 	}()
-
-	sandboxInfo, err := c.client.SandboxStore().Get(ctx, id)
-	if err != nil {
-		return cin, fmt.Errorf("unable to find sandbox with id %q: %w", id, err)
+	podSandbox := c.store.Get(id)
+	if podSandbox == nil {
+		return cin, fmt.Errorf("unable to find pod sandbox with id %q: %w", id, errdefs.ErrNotFound)
 	}
-
-	var metadata sandboxstore.Metadata
-	if err := sandboxInfo.GetExtension(MetadataKey, &metadata); err != nil {
-		return cin, fmt.Errorf("failed to get sandbox %q metadata: %w", id, err)
-	}
+	metadata := podSandbox.Metadata
 
 	var (
 		config = metadata.Config
 		labels = map[string]string{}
 	)
 
+	sandboxImage := c.imageService.PinnedImage("sandbox")
+	if sandboxImage == "" {
+		sandboxImage = criconfig.DefaultSandboxImage
+	}
 	// Ensure sandbox container image snapshot.
-	image, err := c.ensureImageExists(ctx, c.config.SandboxImage, config)
+	image, err := c.ensureImageExists(ctx, sandboxImage, config)
 	if err != nil {
-		return cin, fmt.Errorf("failed to get sandbox image %q: %w", c.config.SandboxImage, err)
+		return cin, fmt.Errorf("failed to get sandbox image %q: %w", sandboxImage, err)
 	}
 
 	containerdImage, err := c.toContainerdImage(ctx, *image)
@@ -90,7 +90,7 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 		return cin, fmt.Errorf("failed to get image from containerd %q: %w", image.ID, err)
 	}
 
-	ociRuntime, err := c.getSandboxRuntime(config, metadata.RuntimeHandler)
+	ociRuntime, err := c.config.GetSandboxRuntime(config, metadata.RuntimeHandler)
 	if err != nil {
 		return cin, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}
@@ -133,7 +133,7 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 		return cin, fmt.Errorf("failed to generate sandbox container spec options: %w", err)
 	}
 
-	sandboxLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, containerKindSandbox)
+	sandboxLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, crilabels.ContainerKindSandbox)
 
 	snapshotterOpt := []snapshots.Opt{snapshots.WithLabels(snapshots.FilterInheritedLabels(config.Annotations))}
 	extraSOpts, err := sandboxSnapshotterOpts(config)
@@ -143,18 +143,19 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	snapshotterOpt = append(snapshotterOpt, extraSOpts...)
 
 	opts := []containerd.NewContainerOpts{
-		containerd.WithSnapshotter(c.runtimeSnapshotter(ctx, ociRuntime)),
+		containerd.WithSnapshotter(c.imageService.RuntimeSnapshotter(ctx, ociRuntime)),
 		customopts.WithNewSnapshot(id, containerdImage, snapshotterOpt...),
 		containerd.WithSpec(spec, specOpts...),
 		containerd.WithContainerLabels(sandboxLabels),
-		containerd.WithContainerExtension(sandboxMetadataExtension, &metadata),
-		containerd.WithRuntime(ociRuntime.Type, sandboxInfo.Runtime.Options),
+		containerd.WithContainerExtension(crilabels.SandboxMetadataExtension, &metadata),
+		containerd.WithRuntime(ociRuntime.Type, podSandbox.Runtime.Options),
 	}
 
 	container, err := c.client.NewContainer(ctx, id, opts...)
 	if err != nil {
 		return cin, fmt.Errorf("failed to create containerd container: %w", err)
 	}
+	podSandbox.Container = container
 	defer func() {
 		if retErr != nil && cleanupErr == nil {
 			deferCtx, deferCancel := ctrdutil.DeferContext()
@@ -162,6 +163,7 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 			if cleanupErr = container.Delete(deferCtx, containerd.WithSnapshotCleanup); cleanupErr != nil {
 				log.G(ctx).WithError(cleanupErr).Errorf("Failed to delete containerd container %q", id)
 			}
+			podSandbox.Container = nil
 		}
 	}()
 
@@ -214,6 +216,7 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	if err != nil {
 		return cin, fmt.Errorf("failed to get sandbox container info: %w", err)
 	}
+	podSandbox.CreatedAt = info.CreatedAt
 
 	// Create sandbox task in containerd.
 	log.G(ctx).Tracef("Create sandbox container (id=%q, name=%q).", id, metadata.Name)
@@ -239,13 +242,13 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 			}
 		}
 	}()
+	podSandbox.Pid = task.Pid()
 
 	// wait is a long running background request, no timeout needed.
 	exitCh, err := task.Wait(ctrdutil.NamespacedContext())
 	if err != nil {
 		return cin, fmt.Errorf("failed to wait for sandbox container task: %w", err)
 	}
-	c.store.Save(id, exitCh)
 
 	nric, err := nri.New()
 	if err != nil {
@@ -264,18 +267,30 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
 	if err := task.Start(ctx); err != nil {
 		return cin, fmt.Errorf("failed to start sandbox container task %q: %w", id, err)
 	}
+	podSandbox.State = sandboxstore.StateReady
 
 	cin.SandboxID = id
 	cin.Pid = task.Pid()
 	cin.CreatedAt = info.CreatedAt
 	cin.Labels = labels
 
+	go func() {
+		code, exitTime, err := c.waitSandboxExit(ctrdutil.NamespacedContext(), podSandbox, exitCh)
+		podSandbox.Exit(*containerd.NewExitStatus(code, exitTime, err))
+	}()
+
 	return
 }
 
-func (c *Controller) Create(ctx context.Context, _info sandbox.Sandbox, _ ...sandbox.CreateOpt) error {
-	// Not used by pod-sandbox implementation as there is no need to split pause containers logic.
-	return nil
+func (c *Controller) Create(_ctx context.Context, info sandbox.Sandbox, opts ...sandbox.CreateOpt) error {
+	metadata := sandboxstore.Metadata{}
+	if err := info.GetExtension(MetadataKey, &metadata); err != nil {
+		return fmt.Errorf("failed to get sandbox %q metadata: %w", info.ID, err)
+	}
+	podSandbox := types.NewPodSandbox(info.ID, sandboxstore.Status{State: sandboxstore.StateUnknown})
+	podSandbox.Metadata = metadata
+	podSandbox.Runtime = info.Runtime
+	return c.store.Save(podSandbox)
 }
 
 func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *runtime.PodSandboxConfig) (*imagestore.Image, error) {
@@ -287,69 +302,15 @@ func (c *Controller) ensureImageExists(ctx context.Context, ref string, config *
 		return &image, nil
 	}
 	// Pull image to ensure the image exists
-	resp, err := c.imageService.PullImage(ctx, &runtime.PullImageRequest{Image: &runtime.ImageSpec{Image: ref}, SandboxConfig: config})
+	// TODO: Cleaner interface
+	imageID, err := c.imageService.PullImage(ctx, ref, nil, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull image %q: %w", ref, err)
 	}
-	imageID := resp.GetImageRef()
 	newImage, err := c.imageService.GetImage(imageID)
 	if err != nil {
 		// It's still possible that someone removed the image right after it is pulled.
 		return nil, fmt.Errorf("failed to get image %q after pulling: %w", imageID, err)
 	}
 	return &newImage, nil
-}
-
-// untrustedWorkload returns true if the sandbox contains untrusted workload.
-func untrustedWorkload(config *runtime.PodSandboxConfig) bool {
-	return config.GetAnnotations()[annotations.UntrustedWorkload] == "true"
-}
-
-// hostAccessingSandbox returns true if the sandbox configuration
-// requires additional host access for the sandbox.
-func hostAccessingSandbox(config *runtime.PodSandboxConfig) bool {
-	securityContext := config.GetLinux().GetSecurityContext()
-
-	namespaceOptions := securityContext.GetNamespaceOptions()
-	if namespaceOptions.GetNetwork() == runtime.NamespaceMode_NODE ||
-		namespaceOptions.GetPid() == runtime.NamespaceMode_NODE ||
-		namespaceOptions.GetIpc() == runtime.NamespaceMode_NODE {
-		return true
-	}
-
-	return false
-}
-
-// getSandboxRuntime returns the runtime configuration for sandbox.
-// If the sandbox contains untrusted workload, runtime for untrusted workload will be returned,
-// or else default runtime will be returned.
-func (c *Controller) getSandboxRuntime(config *runtime.PodSandboxConfig, runtimeHandler string) (criconfig.Runtime, error) {
-	if untrustedWorkload(config) {
-		// If the untrusted annotation is provided, runtimeHandler MUST be empty.
-		if runtimeHandler != "" && runtimeHandler != criconfig.RuntimeUntrusted {
-			return criconfig.Runtime{}, errors.New("untrusted workload with explicit runtime handler is not allowed")
-		}
-
-		//  If the untrusted workload is requesting access to the host/node, this request will fail.
-		//
-		//  Note: If the workload is marked untrusted but requests privileged, this can be granted, as the
-		// runtime may support this.  For example, in a virtual-machine isolated runtime, privileged
-		// is a supported option, granting the workload to access the entire guest VM instead of host.
-		// TODO(windows): Deprecate this so that we don't need to handle it for windows.
-		if hostAccessingSandbox(config) {
-			return criconfig.Runtime{}, errors.New("untrusted workload with host access is not allowed")
-		}
-
-		runtimeHandler = criconfig.RuntimeUntrusted
-	}
-
-	if runtimeHandler == "" {
-		runtimeHandler = c.config.ContainerdConfig.DefaultRuntimeName
-	}
-
-	handler, ok := c.config.ContainerdConfig.Runtimes[runtimeHandler]
-	if !ok {
-		return criconfig.Runtime{}, fmt.Errorf("no runtime for %q is configured", runtimeHandler)
-	}
-	return handler, nil
 }

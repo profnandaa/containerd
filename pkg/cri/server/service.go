@@ -18,39 +18,34 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/oci"
-	"github.com/containerd/containerd/v2/pkg/cri/instrument"
-	"github.com/containerd/containerd/v2/pkg/cri/nri"
-	"github.com/containerd/containerd/v2/pkg/cri/server/images"
-	"github.com/containerd/containerd/v2/pkg/cri/server/podsandbox"
-	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
-	snapshotstore "github.com/containerd/containerd/v2/pkg/cri/store/snapshot"
-	"github.com/containerd/containerd/v2/plugins"
-	"github.com/containerd/containerd/v2/sandbox"
 	"github.com/containerd/go-cni"
 	"github.com/containerd/log"
-	"google.golang.org/grpc"
+
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/kubelet/pkg/cri/streaming"
 
-	"github.com/containerd/containerd/v2/pkg/cri/store/label"
-
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/sandbox"
+	"github.com/containerd/containerd/v2/internal/eventq"
+	"github.com/containerd/containerd/v2/internal/registrar"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
+	"github.com/containerd/containerd/v2/pkg/cri/nri"
+	"github.com/containerd/containerd/v2/pkg/cri/server/podsandbox"
 	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
+	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
+	"github.com/containerd/containerd/v2/pkg/cri/store/label"
 	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
+	snapshotstore "github.com/containerd/containerd/v2/pkg/cri/store/snapshot"
 	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	osinterface "github.com/containerd/containerd/v2/pkg/os"
-	"github.com/containerd/containerd/v2/pkg/registrar"
 )
 
 // defaultNetworkPlugin is used for the default CNI configuration
@@ -58,33 +53,48 @@ const defaultNetworkPlugin = "default"
 
 // CRIService is the interface implement CRI remote service server.
 type CRIService interface {
-	runtime.RuntimeServiceServer
-	runtime.ImageServiceServer
 	// Closer is used by containerd to gracefully stop cri service.
 	io.Closer
 
-	Run(ready func()) error
+	IsInitialized() bool
 
-	Register(*grpc.Server) error
+	Run(ready func()) error
 }
 
-// imageService specifies dependencies to image service.
-type imageService interface {
-	runtime.ImageServiceServer
+type sandboxService interface {
+	SandboxController(config *runtime.PodSandboxConfig, runtimeHandler string) (sandbox.Controller, error)
+}
 
+// RuntimeService specifies dependencies to runtime service which provides
+// the runtime configuration and OCI spec loading.
+type RuntimeService interface {
+	Config() criconfig.Config
+
+	// LoadCISpec loads cached OCI specs via `Runtime.BaseRuntimeSpec`
+	LoadOCISpec(string) (*oci.Spec, error)
+}
+
+// ImageService specifies dependencies to image service.
+type ImageService interface {
 	RuntimeSnapshotter(ctx context.Context, ociRuntime criconfig.Runtime) string
 
+	PullImage(ctx context.Context, name string, credentials func(string) (string, string, error), sandboxConfig *runtime.PodSandboxConfig) (string, error)
 	UpdateImage(ctx context.Context, r string) error
+
+	CheckImages(ctx context.Context) error
 
 	GetImage(id string) (imagestore.Image, error)
 	GetSnapshot(key, snapshotter string) (snapshotstore.Snapshot, error)
 
 	LocalResolve(refOrID string) (imagestore.Image, error)
+
+	ImageFSPaths() map[string]string
 }
 
 // criService implements CRIService.
 type criService struct {
-	imageService
+	RuntimeService
+	ImageService
 	// config contains all configurations.
 	config criconfig.Config
 	// imageFSPaths contains path to image filesystem for snapshotters.
@@ -115,81 +125,75 @@ type criService struct {
 	// cniNetConfMonitor is used to reload cni network conf if there is
 	// any valid fs change events from cni network conf dir.
 	cniNetConfMonitor map[string]*cniNetConfSyncer
-	// baseOCISpecs contains cached OCI specs loaded via `Runtime.BaseRuntimeSpec`
-	baseOCISpecs map[string]*oci.Spec
 	// allCaps is the list of the capabilities.
 	// When nil, parsed from CapEff of /proc/self/status.
 	allCaps []string //nolint:nolintlint,unused // Ignore on non-Linux
-	// containerEventsChan is used to capture container events and send them
-	// to the caller of GetContainerEvents.
-	containerEventsChan chan runtime.ContainerEventResponse
+	// containerEventsQ is used to capture container events and send them
+	// to the callers of GetContainerEvents.
+	containerEventsQ eventq.EventQueue[runtime.ContainerEventResponse]
 	// nri is used to hook NRI into CRI request processing.
 	nri *nri.API
-	// sbcontrollers are the configured sandbox controllers
-	sbControllers map[string]sandbox.Controller
+	// sandboxService is the sandbox related service for CRI
+	sandboxService sandboxService
+}
+
+type CRIServiceOptions struct {
+	RuntimeService RuntimeService
+
+	ImageService ImageService
+
+	StreamingConfig streaming.Config
+
+	NRI *nri.API
+
+	// SandboxControllers is a map of all the loaded sandbox controllers
+	SandboxControllers map[string]sandbox.Controller
+
+	// Client is the base containerd client used for accessing services,
+	//
+	// TODO: Replace this gradually with directly configured instances
+	Client *containerd.Client
 }
 
 // NewCRIService returns a new instance of CRIService
-func NewCRIService(config criconfig.Config, client *containerd.Client, nri *nri.API) (CRIService, error) {
+func NewCRIService(options *CRIServiceOptions) (CRIService, runtime.RuntimeServiceServer, error) {
 	var err error
 	labels := label.NewStore()
-
-	if client.SnapshotService(config.ContainerdConfig.Snapshotter) == nil {
-		return nil, fmt.Errorf("failed to find snapshotter %q", config.ContainerdConfig.Snapshotter)
-	}
-
-	// TODO(dmcgowan): Get the full list directly from configured plugins
-	sbControllers := map[string]sandbox.Controller{
-		string(criconfig.ModePodSandbox): client.SandboxController(string(criconfig.ModePodSandbox)),
-		string(criconfig.ModeShim):       client.SandboxController(string(criconfig.ModeShim)),
-	}
-	imageFSPaths := map[string]string{}
-	for _, ociRuntime := range config.ContainerdConfig.Runtimes {
-		// Can not use `c.RuntimeSnapshotter() yet, so hard-coding here.`
-		snapshotter := ociRuntime.Snapshotter
-		if snapshotter != "" {
-			imageFSPaths[snapshotter] = imageFSPath(config.ContainerdRootDir, snapshotter)
-			log.L.Infof("Get image filesystem path %q for snapshotter %q", imageFSPaths[snapshotter], snapshotter)
-		}
-		if _, ok := sbControllers[ociRuntime.Sandboxer]; !ok {
-			sbControllers[ociRuntime.Sandboxer] = client.SandboxController(ociRuntime.Sandboxer)
-		}
-	}
-	snapshotter := config.ContainerdConfig.Snapshotter
-	imageFSPaths[snapshotter] = imageFSPath(config.ContainerdRootDir, snapshotter)
-	log.L.Infof("Get image filesystem path %q for snapshotter %q", imageFSPaths[snapshotter], snapshotter)
-
-	// TODO: expose this as a separate containerd plugin.
-	imageService, err := images.NewService(config, imageFSPaths, client)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create CRI image service: %w", err)
-	}
+	config := options.RuntimeService.Config()
 
 	c := &criService{
-		imageService:       imageService,
+		RuntimeService:     options.RuntimeService,
+		ImageService:       options.ImageService,
 		config:             config,
-		client:             client,
-		imageFSPaths:       imageFSPaths,
+		client:             options.Client,
+		imageFSPaths:       options.ImageService.ImageFSPaths(),
 		os:                 osinterface.RealOS{},
 		sandboxStore:       sandboxstore.NewStore(labels),
 		containerStore:     containerstore.NewStore(labels),
 		sandboxNameIndex:   registrar.NewRegistrar(),
 		containerNameIndex: registrar.NewRegistrar(),
 		netPlugin:          make(map[string]cni.CNI),
-		sbControllers:      sbControllers,
+		sandboxService:     newCriSandboxService(&config, options.Client),
 	}
 
-	// TODO: figure out a proper channel size.
-	c.containerEventsChan = make(chan runtime.ContainerEventResponse, 1000)
+	// TODO: Make discard time configurable
+	c.containerEventsQ = eventq.New[runtime.ContainerEventResponse](5*time.Minute, func(event runtime.ContainerEventResponse) {
+		containerEventsDroppedCount.Inc()
+		log.L.WithFields(
+			log.Fields{
+				"container": event.ContainerId,
+				"type":      event.ContainerEventType,
+			}).Warn("container event discarded")
+	})
 
 	if err := c.initPlatform(); err != nil {
-		return nil, fmt.Errorf("initialize platform: %w", err)
+		return nil, nil, fmt.Errorf("initialize platform: %w", err)
 	}
 
 	// prepare streaming server
-	c.streamServer, err = newStreamServer(c, config.StreamServerAddress, config.StreamServerPort, config.StreamIdleTimeout)
+	c.streamServer, err = streaming.NewServer(options.StreamingConfig, newStreamRuntime(c))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stream server: %w", err)
+		return nil, nil, fmt.Errorf("failed to create stream server: %w", err)
 	}
 
 	c.eventMonitor = newEventMonitor(c)
@@ -205,45 +209,26 @@ func NewCRIService(config criconfig.Config, client *containerd.Client, nri *nri.
 		if path != "" {
 			m, err := newCNINetConfSyncer(path, i, c.cniLoadOptions())
 			if err != nil {
-				return nil, fmt.Errorf("failed to create cni conf monitor for %s: %w", name, err)
+				return nil, nil, fmt.Errorf("failed to create cni conf monitor for %s: %w", name, err)
 			}
 			c.cniNetConfMonitor[name] = m
 		}
 	}
 
-	// Preload base OCI specs
-	c.baseOCISpecs, err = loadBaseOCISpecs(&config)
-	if err != nil {
-		return nil, err
-	}
-
 	// Initialize pod sandbox controller
-	sbControllers[string(criconfig.ModePodSandbox)].(*podsandbox.Controller).Init(config, client, c.sandboxStore, c.os, c, c.imageService, c.baseOCISpecs)
+	// TODO: Get this from options, NOT client
+	podSandboxController := options.Client.SandboxController(string(criconfig.ModePodSandbox)).(*podsandbox.Controller)
+	podSandboxController.Init(c)
 
-	c.nri = nri
+	c.nri = options.NRI
 
-	return c, nil
+	return c, c, nil
 }
 
 // BackOffEvent is a temporary workaround to call eventMonitor from controller.Stop.
 // TODO: get rid of this.
 func (c *criService) BackOffEvent(id string, event interface{}) {
 	c.eventMonitor.backOff.enBackOff(id, event)
-}
-
-// Register registers all required services onto a specific grpc server.
-// This is used by containerd cri plugin.
-func (c *criService) Register(s *grpc.Server) error {
-	return c.register(s)
-}
-
-// RegisterTCP register all required services onto a GRPC server on TCP.
-// This is used by containerd CRI plugin.
-func (c *criService) RegisterTCP(s *grpc.Server) error {
-	if !c.config.DisableTCPService {
-		return c.register(s)
-	}
-	return nil
 }
 
 // Run starts the CRI service.
@@ -354,71 +339,4 @@ func (c *criService) Close() error {
 // IsInitialized indicates whether CRI service has finished initialization.
 func (c *criService) IsInitialized() bool {
 	return c.initialized.Load()
-}
-
-func (c *criService) register(s *grpc.Server) error {
-	instrumented := instrument.NewService(c)
-	runtime.RegisterRuntimeServiceServer(s, instrumented)
-	runtime.RegisterImageServiceServer(s, instrumented)
-	return nil
-}
-
-// getSandboxController returns the sandbox controller configuration for sandbox.
-// If absent in legacy case, it will return the default controller.
-func (c *criService) getSandboxController(config *runtime.PodSandboxConfig, runtimeHandler string) (sandbox.Controller, error) {
-	ociRuntime, err := c.getSandboxRuntime(config, runtimeHandler)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
-	}
-
-	controller, ok := c.sbControllers[ociRuntime.Sandboxer]
-	if !ok {
-		return nil, fmt.Errorf("no sandbox controller %s for runtime %s", ociRuntime.Sandboxer, runtimeHandler)
-	}
-
-	return controller, nil
-}
-
-// imageFSPath returns containerd image filesystem path.
-// Note that if containerd changes directory layout, we also needs to change this.
-func imageFSPath(rootDir, snapshotter string) string {
-	return filepath.Join(rootDir, plugins.SnapshotPlugin.String()+"."+snapshotter)
-}
-
-func loadOCISpec(filename string) (*oci.Spec, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open base OCI spec: %s: %w", filename, err)
-	}
-	defer file.Close()
-
-	spec := oci.Spec{}
-	if err := json.NewDecoder(file).Decode(&spec); err != nil {
-		return nil, fmt.Errorf("failed to parse base OCI spec file: %w", err)
-	}
-
-	return &spec, nil
-}
-
-func loadBaseOCISpecs(config *criconfig.Config) (map[string]*oci.Spec, error) {
-	specs := map[string]*oci.Spec{}
-	for _, cfg := range config.Runtimes {
-		if cfg.BaseRuntimeSpec == "" {
-			continue
-		}
-
-		// Don't load same file twice
-		if _, ok := specs[cfg.BaseRuntimeSpec]; ok {
-			continue
-		}
-
-		spec, err := loadOCISpec(cfg.BaseRuntimeSpec)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load base OCI spec from file: %s: %w", cfg.BaseRuntimeSpec, err)
-		}
-
-		specs[cfg.BaseRuntimeSpec] = spec
-	}
-
-	return specs, nil
 }

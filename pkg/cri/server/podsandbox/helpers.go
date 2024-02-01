@@ -23,18 +23,20 @@ import (
 	"path/filepath"
 	"time"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/containers"
-	clabels "github.com/containerd/containerd/v2/labels"
-	"github.com/containerd/containerd/v2/oci"
-	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
-	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
-	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
 	"github.com/containerd/log"
+	"github.com/containerd/typeurl/v2"
 	docker "github.com/distribution/reference"
+	imagedigest "github.com/opencontainers/go-digest"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 
-	imagedigest "github.com/opencontainers/go-digest"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
+	crilabels "github.com/containerd/containerd/v2/pkg/cri/labels"
+	imagestore "github.com/containerd/containerd/v2/pkg/cri/store/image"
+	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
+	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
+	clabels "github.com/containerd/containerd/v2/pkg/labels"
+	"github.com/containerd/containerd/v2/pkg/oci"
 )
 
 const (
@@ -43,14 +45,6 @@ const (
 	// directory of the sandbox, all files created for the sandbox will be
 	// placed under this directory.
 	sandboxesDir = "sandboxes"
-	// criContainerdPrefix is common prefix for cri-containerd
-	criContainerdPrefix = "io.cri-containerd"
-	// containerKindLabel is a label key indicating container is sandbox container or application container
-	containerKindLabel = criContainerdPrefix + ".kind"
-	// containerKindSandbox is a label value indicating container is sandbox container
-	containerKindSandbox = "sandbox"
-	// sandboxMetadataExtension is an extension name that identify metadata of sandbox in CreateContainerRequest
-	sandboxMetadataExtension = criContainerdPrefix + ".sandbox.metadata"
 	// MetadataKey is the key used for storing metadata in the sandbox extensions
 	MetadataKey = "metadata"
 )
@@ -117,7 +111,7 @@ func buildLabels(configLabels, imageConfigLabels map[string]string, containerTyp
 	for k, v := range configLabels {
 		labels[k] = v
 	}
-	labels[containerKindLabel] = containerType
+	labels[crilabels.ContainerKindLabel] = containerType
 	return labels
 }
 
@@ -165,9 +159,9 @@ func (c *Controller) runtimeSpec(id string, baseSpecFile string, opts ...oci.Spe
 	container := &containers.Container{ID: id}
 
 	if baseSpecFile != "" {
-		baseSpec, ok := c.baseOCISpecs[baseSpecFile]
-		if !ok {
-			return nil, fmt.Errorf("can't find base OCI spec %q", baseSpecFile)
+		baseSpec, err := c.runtimeService.LoadOCISpec(baseSpecFile)
+		if err != nil {
+			return nil, fmt.Errorf("can't load base OCI spec %q: %w", baseSpecFile, err)
 		}
 
 		spec := oci.Spec{}
@@ -193,13 +187,23 @@ func (c *Controller) runtimeSpec(id string, baseSpecFile string, opts ...oci.Spe
 	return spec, nil
 }
 
-// Overrides the default snapshotter if Snapshotter is set for this runtime.
-// See https://github.com/containerd/containerd/issues/6657
-func (c *Controller) runtimeSnapshotter(ctx context.Context, ociRuntime criconfig.Runtime) string {
-	if ociRuntime.Snapshotter == "" {
-		return c.config.ContainerdConfig.Snapshotter
+func getMetadata(ctx context.Context, container containerd.Container) (*sandboxstore.Metadata, error) {
+	// Load sandbox metadata.
+	exts, err := container.Extensions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sandbox container extensions: %w", err)
 	}
-
-	log.G(ctx).Debugf("Set snapshotter for runtime %s to %s", ociRuntime.Type, ociRuntime.Snapshotter)
-	return ociRuntime.Snapshotter
+	ext, ok := exts[crilabels.SandboxMetadataExtension]
+	if !ok {
+		return nil, fmt.Errorf("metadata extension %q not found", crilabels.SandboxMetadataExtension)
+	}
+	data, err := typeurl.UnmarshalAny(ext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal metadata extension %q: %w", ext, err)
+	}
+	meta, ok := data.(*sandboxstore.Metadata)
+	if !ok {
+		return nil, fmt.Errorf("failed to convert the extension to sandbox metadata")
+	}
+	return meta, nil
 }

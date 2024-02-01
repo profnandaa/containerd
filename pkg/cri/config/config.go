@@ -24,6 +24,40 @@ import (
 	"time"
 
 	"github.com/containerd/log"
+	"github.com/pelletier/go-toml/v2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubelet/pkg/cri/streaming"
+
+	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
+	runcoptions "github.com/containerd/containerd/v2/core/runtime/v2/runc/options"
+	"github.com/containerd/containerd/v2/pkg/cri/annotations"
+	"github.com/containerd/containerd/v2/pkg/deprecation"
+	runtimeoptions "github.com/containerd/containerd/v2/pkg/runtimeoptions/v1"
+	"github.com/containerd/containerd/v2/plugins"
+)
+
+const (
+	// defaultImagePullProgressTimeoutDuration is the default value of imagePullProgressTimeout.
+	//
+	// NOTE:
+	//
+	// This ImagePullProgressTimeout feature is ported from kubelet/dockershim's
+	// --image-pull-progress-deadline. The original value is 1m0. Unlike docker
+	// daemon, the containerd doesn't have global concurrent download limitation
+	// before migrating to Transfer Service. If kubelet runs with concurrent
+	// image pull, the node will run under IO pressure. The ImagePull process
+	// could be impacted by self, if the target image is large one with a
+	// lot of layers. And also both container's writable layers and image's storage
+	// share one disk. The ImagePull process commits blob to content store
+	// with fsync, which might bring the unrelated files' dirty pages into
+	// disk in one transaction [1]. The 1m0 value isn't good enough. Based
+	// on #9347 case and kubernetes community's usage [2], the default value
+	// is updated to 5m0. If end-user still runs into unexpected cancel,
+	// they need to config it based on their environment.
+	//
+	// [1]: Fast commits for ext4 - https://lwn.net/Articles/842385/
+	// [2]: https://github.com/kubernetes/kubernetes/blob/1635c380b26a1d8cc25d36e9feace9797f4bae3c/cluster/gce/util.sh#L882
+	defaultImagePullProgressTimeoutDuration = 5 * time.Minute
 )
 
 type SandboxControllerMode string
@@ -34,6 +68,9 @@ const (
 	ModePodSandbox SandboxControllerMode = "podsandbox"
 	// ModeShim means use whatever Controller implementation provided by shim.
 	ModeShim SandboxControllerMode = "shim"
+	// DefaultSandboxImage is the default image to use for sandboxes when empty or
+	// for default configurations.
+	DefaultSandboxImage = "registry.k8s.io/pause:3.9"
 )
 
 // Runtime struct to contain the type(ID), engine, and root variables for a default runtime
@@ -83,24 +120,12 @@ type Runtime struct {
 
 // ContainerdConfig contains toml config related to containerd
 type ContainerdConfig struct {
-	// Snapshotter is the snapshotter used by containerd.
-	Snapshotter string `toml:"snapshotter" json:"snapshotter"`
 	// DefaultRuntimeName is the default runtime name to use from the runtimes table.
 	DefaultRuntimeName string `toml:"default_runtime_name" json:"defaultRuntimeName"`
 
 	// Runtimes is a map from CRI RuntimeHandler strings, which specify types of runtime
 	// configurations, to the matching configurations.
 	Runtimes map[string]Runtime `toml:"runtimes" json:"runtimes"`
-
-	// DisableSnapshotAnnotations disables to pass additional annotations (image
-	// related information) to snapshotters. These annotations are required by
-	// stargz snapshotter (https://github.com/containerd/stargz-snapshotter).
-	DisableSnapshotAnnotations bool `toml:"disable_snapshot_annotations" json:"disableSnapshotAnnotations"`
-
-	// DiscardUnpackedLayers is a boolean flag to specify whether to allow GC to
-	// remove layers from the content store after successfully unpacking these
-	// layers to the snapshotter.
-	DiscardUnpackedLayers bool `toml:"discard_unpacked_layers" json:"discardUnpackedLayers"`
 
 	// IgnoreBlockIONotEnabledErrors is a boolean flag to ignore
 	// blockio related errors when blockio support has not been
@@ -216,41 +241,90 @@ type ImageDecryption struct {
 	KeyModel string `toml:"key_model" json:"keyModel"`
 }
 
-// PluginConfig contains toml config related to CRI plugin,
+// ImagePlatform represents the platform to use for an image including the
+// snapshotter to use. If snapshotter is not provided, the platform default
+// can be assumed. When platform is not provided, the default platform can
+// be assumed
+type ImagePlatform struct {
+	Platform string `toml:"platform" json:"platform"`
+	// Snapshotter setting snapshotter at runtime level instead of making it as a global configuration.
+	// An example use case is to use devmapper or other snapshotters in Kata containers for performance and security
+	// while using default snapshotters for operational simplicity.
+	// See https://github.com/containerd/containerd/issues/6657 for details.
+	Snapshotter string `toml:"snapshotter" json:"snapshotter"`
+}
+
+type ImageConfig struct {
+	// Snapshotter is the snapshotter used by containerd.
+	Snapshotter string `toml:"snapshotter" json:"snapshotter"`
+
+	// DisableSnapshotAnnotations disables to pass additional annotations (image
+	// related information) to snapshotters. These annotations are required by
+	// stargz snapshotter (https://github.com/containerd/stargz-snapshotter).
+	DisableSnapshotAnnotations bool `toml:"disable_snapshot_annotations" json:"disableSnapshotAnnotations"`
+
+	// DiscardUnpackedLayers is a boolean flag to specify whether to allow GC to
+	// remove layers from the content store after successfully unpacking these
+	// layers to the snapshotter.
+	DiscardUnpackedLayers bool `toml:"discard_unpacked_layers" json:"discardUnpackedLayers"`
+
+	// PinnedImages are images which the CRI plugin uses and should not be
+	// removed by the CRI client. The images have a key which can be used
+	// by other plugins to lookup the current image name.
+	// Image names should be full names including domain and tag
+	// Examples:
+	//   "sandbox": "k8s.gcr.io/pause:3.9"
+	//   "base": "docker.io/library/ubuntu:latest"
+	// Migrated from:
+	// (PluginConfig).SandboxImage string `toml:"sandbox_image" json:"sandboxImage"`
+	PinnedImages map[string]string
+
+	// RuntimePlatforms is map between the runtime and the image platform to
+	// use for that runtime. When resolving an image for a runtime, this
+	// mapping will be used to select the image for the platform and the
+	// snapshotter for unpacking.
+	RuntimePlatforms map[string]ImagePlatform `toml:"runtime_platforms" json:"runtimePlatforms"`
+
+	// Registry contains config related to the registry
+	Registry Registry `toml:"registry" json:"registry"`
+
+	// ImageDecryption contains config related to handling decryption of encrypted container images
+	ImageDecryption `toml:"image_decryption" json:"imageDecryption"`
+
+	// MaxConcurrentDownloads restricts the number of concurrent downloads for each image.
+	// TODO: Migrate to transfer service
+	MaxConcurrentDownloads int `toml:"max_concurrent_downloads" json:"maxConcurrentDownloads"`
+
+	// ImagePullProgressTimeout is the maximum duration that there is no
+	// image data read from image registry in the open connection. It will
+	// be reset whatever a new byte has been read. If timeout, the image
+	// pulling will be cancelled. A zero value means there is no timeout.
+	//
+	// The string is in the golang duration format, see:
+	//   https://golang.org/pkg/time/#ParseDuration
+	ImagePullProgressTimeout string `toml:"image_pull_progress_timeout" json:"imagePullProgressTimeout"`
+
+	// ImagePullWithSyncFs is an experimental setting. It's to force sync
+	// filesystem during unpacking to ensure that data integrity.
+	// TODO: Migrate to transfer service
+	ImagePullWithSyncFs bool `toml:"image_pull_with_sync_fs" json:"imagePullWithSyncFs"`
+
+	// StatsCollectPeriod is the period (in seconds) of snapshots stats collection.
+	StatsCollectPeriod int `toml:"stats_collect_period" json:"statsCollectPeriod"`
+}
+
+// RuntimeConfig contains toml config related to CRI plugin,
 // it is a subset of Config.
-type PluginConfig struct {
+type RuntimeConfig struct {
 	// ContainerdConfig contains config related to containerd
 	ContainerdConfig `toml:"containerd" json:"containerd"`
 	// CniConfig contains config related to cni
 	CniConfig `toml:"cni" json:"cni"`
-	// Registry contains config related to the registry
-	Registry Registry `toml:"registry" json:"registry"`
-	// ImageDecryption contains config related to handling decryption of encrypted container images
-	ImageDecryption `toml:"image_decryption" json:"imageDecryption"`
-	// DisableTCPService disables serving CRI on the TCP server.
-	DisableTCPService bool `toml:"disable_tcp_service" json:"disableTCPService"`
-	// StreamServerAddress is the ip address streaming server is listening on.
-	StreamServerAddress string `toml:"stream_server_address" json:"streamServerAddress"`
-	// StreamServerPort is the port streaming server is listening on.
-	StreamServerPort string `toml:"stream_server_port" json:"streamServerPort"`
-	// StreamIdleTimeout is the maximum time a streaming connection
-	// can be idle before the connection is automatically closed.
-	// The string is in the golang duration format, see:
-	//   https://golang.org/pkg/time/#ParseDuration
-	StreamIdleTimeout string `toml:"stream_idle_timeout" json:"streamIdleTimeout"`
 	// EnableSelinux indicates to enable the selinux support.
 	EnableSelinux bool `toml:"enable_selinux" json:"enableSelinux"`
 	// SelinuxCategoryRange allows the upper bound on the category range to be set.
 	// If not specified or set to 0, defaults to 1024 from the selinux package.
 	SelinuxCategoryRange int `toml:"selinux_category_range" json:"selinuxCategoryRange"`
-	// SandboxImage is the image used by sandbox container.
-	SandboxImage string `toml:"sandbox_image" json:"sandboxImage"`
-	// StatsCollectPeriod is the period (in seconds) of snapshots stats collection.
-	StatsCollectPeriod int `toml:"stats_collect_period" json:"statsCollectPeriod"`
-	// EnableTLSStreaming indicates to enable the TLS streaming support.
-	EnableTLSStreaming bool `toml:"enable_tls_streaming" json:"enableTLSStreaming"`
-	// X509KeyPairStreaming is a x509 key pair used for TLS streaming
-	X509KeyPairStreaming `toml:"x509_key_pair_streaming" json:"x509KeyPairStreaming"`
 	// MaxContainerLogLineSize is the maximum log line size in bytes for a container.
 	// Log line longer than the limit will be split into multiple lines. Non-positive
 	// value means no limit.
@@ -265,8 +339,6 @@ type PluginConfig struct {
 	// current OOMScoreADj.
 	// This is useful when the containerd does not have permission to decrease OOMScoreAdj.
 	RestrictOOMScoreAdj bool `toml:"restrict_oom_score_adj" json:"restrictOOMScoreAdj"`
-	// MaxConcurrentDownloads restricts the number of concurrent downloads for each image.
-	MaxConcurrentDownloads int `toml:"max_concurrent_downloads" json:"maxConcurrentDownloads"`
 	// DisableProcMount disables Kubernetes ProcMount support. This MUST be set to `true`
 	// when using containerd with Kubernetes <=1.11.
 	DisableProcMount bool `toml:"disable_proc_mount" json:"disableProcMount"`
@@ -306,20 +378,13 @@ type PluginConfig struct {
 	// EnableCDI indicates to enable injection of the Container Device Interface Specifications
 	// into the OCI config
 	// For more details about CDI and the syntax of CDI Spec files please refer to
-	// https://github.com/container-orchestrated-devices/container-device-interface.
+	// https://tags.cncf.io/container-device-interface.
 	EnableCDI bool `toml:"enable_cdi" json:"enableCDI"`
 	// CDISpecDirs is the list of directories to scan for Container Device Interface Specifications
 	// For more details about CDI configuration please refer to
-	// https://github.com/container-orchestrated-devices/container-device-interface#containerd-configuration
+	// https://tags.cncf.io/container-device-interface#containerd-configuration
 	CDISpecDirs []string `toml:"cdi_spec_dirs" json:"cdiSpecDirs"`
-	// ImagePullProgressTimeout is the maximum duration that there is no
-	// image data read from image registry in the open connection. It will
-	// be reset whatever a new byte has been read. If timeout, the image
-	// pulling will be cancelled. A zero value means there is no timeout.
-	//
-	// The string is in the golang duration format, see:
-	//   https://golang.org/pkg/time/#ParseDuration
-	ImagePullProgressTimeout string `toml:"image_pull_progress_timeout" json:"imagePullProgressTimeout"`
+
 	// DrainExecSyncIOTimeout is the maximum duration to wait for ExecSync
 	// API' IO EOF event after exec init process exits. A zero value means
 	// there is no timeout.
@@ -339,10 +404,10 @@ type X509KeyPairStreaming struct {
 	TLSKeyFile string `toml:"tls_key_file" json:"tlsKeyFile"`
 }
 
-// Config contains all configurations for cri server.
+// Config contains all configurations for CRI runtime plugin.
 type Config struct {
-	// PluginConfig is the config for CRI plugin.
-	PluginConfig
+	// RuntimeConfig is the config for CRI runtime.
+	RuntimeConfig
 	// ContainerdRootDir is the root directory path for containerd.
 	ContainerdRootDir string `json:"containerdRootDir"`
 	// ContainerdEndpoint is the containerd endpoint path.
@@ -352,6 +417,25 @@ type Config struct {
 	RootDir string `json:"rootDir"`
 	// StateDir is the root directory path for managing volatile pod/container data
 	StateDir string `json:"stateDir"`
+}
+
+// ServerConfig contains all the configuration for the CRI API server.
+type ServerConfig struct {
+	// DisableTCPService disables serving CRI on the TCP server.
+	DisableTCPService bool `toml:"disable_tcp_service" json:"disableTCPService"`
+	// StreamServerAddress is the ip address streaming server is listening on.
+	StreamServerAddress string `toml:"stream_server_address" json:"streamServerAddress"`
+	// StreamServerPort is the port streaming server is listening on.
+	StreamServerPort string `toml:"stream_server_port" json:"streamServerPort"`
+	// StreamIdleTimeout is the maximum time a streaming connection
+	// can be idle before the connection is automatically closed.
+	// The string is in the golang duration format, see:
+	//   https://golang.org/pkg/time/#ParseDuration
+	StreamIdleTimeout string `toml:"stream_idle_timeout" json:"streamIdleTimeout"`
+	// EnableTLSStreaming indicates to enable the TLS streaming support.
+	EnableTLSStreaming bool `toml:"enable_tls_streaming" json:"enableTLSStreaming"`
+	// X509KeyPairStreaming is a x509 key pair used for TLS streaming
+	X509KeyPairStreaming `toml:"x509_key_pair_streaming" json:"x509KeyPairStreaming"`
 }
 
 const (
@@ -364,37 +448,22 @@ const (
 	KeyModelNode = "node"
 )
 
-// ValidatePluginConfig validates the given plugin configuration.
-func ValidatePluginConfig(ctx context.Context, c *PluginConfig) error {
-	if c.ContainerdConfig.Runtimes == nil {
-		c.ContainerdConfig.Runtimes = make(map[string]Runtime)
-	}
-
-	// Validation for default_runtime_name
-	if c.ContainerdConfig.DefaultRuntimeName == "" {
-		return errors.New("`default_runtime_name` is empty")
-	}
-	if _, ok := c.ContainerdConfig.Runtimes[c.ContainerdConfig.DefaultRuntimeName]; !ok {
-		return fmt.Errorf("no corresponding runtime configured in `containerd.runtimes` for `containerd` `default_runtime_name = \"%s\"", c.ContainerdConfig.DefaultRuntimeName)
-	}
-
-	for k, r := range c.ContainerdConfig.Runtimes {
-		if !r.PrivilegedWithoutHostDevices && r.PrivilegedWithoutHostDevicesAllDevicesAllowed {
-			return errors.New("`privileged_without_host_devices_all_devices_allowed` requires `privileged_without_host_devices` to be enabled")
-		}
-		// If empty, use default podSandbox mode
-		if len(r.Sandboxer) == 0 {
-			r.Sandboxer = string(ModePodSandbox)
-			c.ContainerdConfig.Runtimes[k] = r
-		}
-	}
+// ValidateImageConfig validates the given image configuration
+func ValidateImageConfig(ctx context.Context, c *ImageConfig) ([]deprecation.Warning, error) {
+	var warnings []deprecation.Warning
 
 	useConfigPath := c.Registry.ConfigPath != ""
 	if len(c.Registry.Mirrors) > 0 {
 		if useConfigPath {
-			return errors.New("`mirrors` cannot be set when `config_path` is provided")
+			return warnings, errors.New("`mirrors` cannot be set when `config_path` is provided")
 		}
+		warnings = append(warnings, deprecation.CRIRegistryMirrors)
 		log.G(ctx).Warning("`mirrors` is deprecated, please use `config_path` instead")
+	}
+
+	if len(c.Registry.Configs) != 0 {
+		warnings = append(warnings, deprecation.CRIRegistryConfigs)
+		log.G(ctx).Warning("`configs` is deprecated, please use `config_path` instead")
 	}
 
 	// Validation for deprecated auths options and mapping it to configs.
@@ -406,7 +475,7 @@ func ValidatePluginConfig(ctx context.Context, c *PluginConfig) error {
 			auth := auth
 			u, err := url.Parse(endpoint)
 			if err != nil {
-				return fmt.Errorf("failed to parse registry url %q from `registry.auths`: %w", endpoint, err)
+				return warnings, fmt.Errorf("failed to parse registry url %q from `registry.auths`: %w", endpoint, err)
 			}
 			if u.Scheme != "" {
 				// Do not include the scheme in the new registry config.
@@ -416,28 +485,169 @@ func ValidatePluginConfig(ctx context.Context, c *PluginConfig) error {
 			config.Auth = &auth
 			c.Registry.Configs[endpoint] = config
 		}
-		log.G(ctx).Warning("`auths` is deprecated, please use `configs` instead")
-	}
-
-	// Validation for stream_idle_timeout
-	if c.StreamIdleTimeout != "" {
-		if _, err := time.ParseDuration(c.StreamIdleTimeout); err != nil {
-			return fmt.Errorf("invalid stream idle timeout: %w", err)
-		}
+		warnings = append(warnings, deprecation.CRIRegistryAuths)
+		log.G(ctx).Warning("`auths` is deprecated, please use `ImagePullSecrets` instead")
 	}
 
 	// Validation for image_pull_progress_timeout
 	if c.ImagePullProgressTimeout != "" {
 		if _, err := time.ParseDuration(c.ImagePullProgressTimeout); err != nil {
-			return fmt.Errorf("invalid image pull progress timeout: %w", err)
+			return warnings, fmt.Errorf("invalid image pull progress timeout: %w", err)
+		}
+	}
+
+	return warnings, nil
+}
+
+// ValidateRuntimeConfig validates the given runtime configuration.
+func ValidateRuntimeConfig(ctx context.Context, c *RuntimeConfig) ([]deprecation.Warning, error) {
+	var warnings []deprecation.Warning
+	if c.ContainerdConfig.Runtimes == nil {
+		c.ContainerdConfig.Runtimes = make(map[string]Runtime)
+	}
+
+	// Validation for default_runtime_name
+	if c.ContainerdConfig.DefaultRuntimeName == "" {
+		return warnings, errors.New("`default_runtime_name` is empty")
+	}
+	if _, ok := c.ContainerdConfig.Runtimes[c.ContainerdConfig.DefaultRuntimeName]; !ok {
+		return warnings, fmt.Errorf("no corresponding runtime configured in `containerd.runtimes` for `containerd` `default_runtime_name = \"%s\"", c.ContainerdConfig.DefaultRuntimeName)
+	}
+
+	for k, r := range c.ContainerdConfig.Runtimes {
+		if !r.PrivilegedWithoutHostDevices && r.PrivilegedWithoutHostDevicesAllDevicesAllowed {
+			return warnings, errors.New("`privileged_without_host_devices_all_devices_allowed` requires `privileged_without_host_devices` to be enabled")
+		}
+		// If empty, use default podSandbox mode
+		if len(r.Sandboxer) == 0 {
+			r.Sandboxer = string(ModePodSandbox)
+			c.ContainerdConfig.Runtimes[k] = r
 		}
 	}
 
 	// Validation for drain_exec_sync_io_timeout
 	if c.DrainExecSyncIOTimeout != "" {
 		if _, err := time.ParseDuration(c.DrainExecSyncIOTimeout); err != nil {
-			return fmt.Errorf("invalid `drain_exec_sync_io_timeout`: %w", err)
+			return warnings, fmt.Errorf("invalid `drain_exec_sync_io_timeout`: %w", err)
 		}
 	}
-	return nil
+	if err := ValidateEnableUnprivileged(ctx, c); err != nil {
+		return warnings, err
+	}
+	return warnings, nil
+}
+
+// ValidateServerConfig validates the given server configuration.
+func ValidateServerConfig(ctx context.Context, c *ServerConfig) ([]deprecation.Warning, error) {
+	var warnings []deprecation.Warning
+	// Validation for stream_idle_timeout
+	if c.StreamIdleTimeout != "" {
+		if _, err := time.ParseDuration(c.StreamIdleTimeout); err != nil {
+			return warnings, fmt.Errorf("invalid stream idle timeout: %w", err)
+		}
+	}
+	return warnings, nil
+}
+
+func (config *Config) GetSandboxRuntime(podSandboxConfig *runtime.PodSandboxConfig, runtimeHandler string) (Runtime, error) {
+	if untrustedWorkload(podSandboxConfig) {
+		// If the untrusted annotation is provided, runtimeHandler MUST be empty.
+		if runtimeHandler != "" && runtimeHandler != RuntimeUntrusted {
+			return Runtime{}, errors.New("untrusted workload with explicit runtime handler is not allowed")
+		}
+
+		//  If the untrusted workload is requesting access to the host/node, this request will fail.
+		//
+		//  Note: If the workload is marked untrusted but requests privileged, this can be granted, as the
+		// runtime may support this.  For example, in a virtual-machine isolated runtime, privileged
+		// is a supported option, granting the workload to access the entire guest VM instead of host.
+		// TODO(windows): Deprecate this so that we don't need to handle it for windows.
+		if hostAccessingSandbox(podSandboxConfig) {
+			return Runtime{}, errors.New("untrusted workload with host access is not allowed")
+		}
+
+		runtimeHandler = RuntimeUntrusted
+	}
+
+	if runtimeHandler == "" {
+		runtimeHandler = config.DefaultRuntimeName
+	}
+
+	r, ok := config.Runtimes[runtimeHandler]
+	if !ok {
+		return Runtime{}, fmt.Errorf("no runtime for %q is configured", runtimeHandler)
+	}
+	return r, nil
+
+}
+
+// untrustedWorkload returns true if the sandbox contains untrusted workload.
+func untrustedWorkload(config *runtime.PodSandboxConfig) bool {
+	return config.GetAnnotations()[annotations.UntrustedWorkload] == "true"
+}
+
+// hostAccessingSandbox returns true if the sandbox configuration
+// requires additional host access for the sandbox.
+func hostAccessingSandbox(config *runtime.PodSandboxConfig) bool {
+	securityContext := config.GetLinux().GetSecurityContext()
+
+	namespaceOptions := securityContext.GetNamespaceOptions()
+	if namespaceOptions.GetNetwork() == runtime.NamespaceMode_NODE ||
+		namespaceOptions.GetPid() == runtime.NamespaceMode_NODE ||
+		namespaceOptions.GetIpc() == runtime.NamespaceMode_NODE {
+		return true
+	}
+
+	return false
+}
+
+// GenerateRuntimeOptions generates runtime options from cri plugin config.
+func GenerateRuntimeOptions(r Runtime) (interface{}, error) {
+	if r.Options == nil {
+		return nil, nil
+	}
+
+	b, err := toml.Marshal(r.Options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal TOML blob for runtime %q: %w", r.Type, err)
+	}
+
+	options := getRuntimeOptionsType(r.Type)
+	if err := toml.Unmarshal(b, options); err != nil {
+		return nil, err
+	}
+
+	// For generic configuration, if no config path specified (preserving old behavior), pass
+	// the whole TOML configuration section to the runtime.
+	if runtimeOpts, ok := options.(*runtimeoptions.Options); ok && runtimeOpts.ConfigPath == "" {
+		runtimeOpts.ConfigBody = b
+	}
+
+	return options, nil
+}
+
+// getRuntimeOptionsType gets empty runtime options by the runtime type name.
+func getRuntimeOptionsType(t string) interface{} {
+	switch t {
+	case plugins.RuntimeRuncV2:
+		return &runcoptions.Options{}
+	case plugins.RuntimeRunhcsV1:
+		return &runhcsoptions.Options{}
+	default:
+		return &runtimeoptions.Options{}
+	}
+}
+
+func DefaultServerConfig() ServerConfig {
+	return ServerConfig{
+		DisableTCPService:   true,
+		StreamServerAddress: "127.0.0.1",
+		StreamServerPort:    "0",
+		StreamIdleTimeout:   streaming.DefaultConfig.StreamIdleTimeout.String(), // 4 hour
+		EnableTLSStreaming:  false,
+		X509KeyPairStreaming: X509KeyPairStreaming{
+			TLSKeyFile:  "",
+			TLSCertFile: "",
+		},
+	}
 }

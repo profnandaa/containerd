@@ -26,13 +26,14 @@ import (
 
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/oci"
+	"github.com/containerd/containerd/v2/core/containers"
+	runcoptions "github.com/containerd/containerd/v2/core/runtime/v2/runc/options"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
+	crilabels "github.com/containerd/containerd/v2/pkg/cri/labels"
 	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/containerd/v2/protobuf/types"
-	runcoptions "github.com/containerd/containerd/v2/runtime/v2/runc/options"
 	"github.com/containerd/typeurl/v2"
 
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
@@ -99,16 +100,16 @@ func TestBuildLabels(t *testing.T) {
 		"a": "b",
 		"c": "d",
 	}
-	newLabels := buildLabels(configLabels, imageConfigLabels, containerKindSandbox)
+	newLabels := buildLabels(configLabels, imageConfigLabels, crilabels.ContainerKindSandbox)
 	assert.Len(t, newLabels, 4)
 	assert.Equal(t, "b", newLabels["a"])
 	assert.Equal(t, "d", newLabels["c"])
 	assert.Equal(t, "y", newLabels["d"])
-	assert.Equal(t, containerKindSandbox, newLabels[containerKindLabel])
+	assert.Equal(t, crilabels.ContainerKindSandbox, newLabels[crilabels.ContainerKindLabel])
 	assert.NotContains(t, newLabels, "long-label")
 
 	newLabels["a"] = "e"
-	assert.Empty(t, configLabels[containerKindLabel], "should not add new labels into original label")
+	assert.Empty(t, configLabels[crilabels.ContainerKindLabel], "should not add new labels into original label")
 	assert.Equal(t, "b", configLabels["a"], "change in new labels should not affect original label")
 }
 
@@ -174,7 +175,7 @@ systemd_cgroup = true
 	} {
 		test := test
 		t.Run(test.desc, func(t *testing.T) {
-			opts, err := generateRuntimeOptions(test.r)
+			opts, err := criconfig.GenerateRuntimeOptions(test.r)
 			assert.NoError(t, err)
 			assert.Equal(t, test.expectedOptions, opts)
 		})

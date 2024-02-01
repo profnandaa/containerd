@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	"github.com/davecgh/go-spew/spew"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -34,17 +35,17 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/containers"
-	"github.com/containerd/containerd/v2/oci"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/blockio"
 	"github.com/containerd/containerd/v2/pkg/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
 	cio "github.com/containerd/containerd/v2/pkg/cri/io"
+	crilabels "github.com/containerd/containerd/v2/pkg/cri/labels"
 	customopts "github.com/containerd/containerd/v2/pkg/cri/opts"
 	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
 	"github.com/containerd/containerd/v2/pkg/cri/util"
-	"github.com/containerd/containerd/v2/platforms"
-	"github.com/containerd/log"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/platforms"
 )
 
 func init() {
@@ -62,7 +63,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		return nil, fmt.Errorf("failed to find sandbox id %q: %w", r.GetPodSandboxId(), err)
 	}
 
-	controller, err := c.getSandboxController(sandbox.Config, sandbox.RuntimeHandler)
+	controller, err := c.sandboxService.SandboxController(sandbox.Config, sandbox.RuntimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox controller: %w", err)
 	}
@@ -162,7 +163,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		log.G(ctx).Debugf("Ignoring volumes defined in image %v because IgnoreImageDefinedVolumes is set", image.ID)
 	}
 
-	ociRuntime, err := c.getSandboxRuntime(sandboxConfig, sandbox.Metadata.RuntimeHandler)
+	ociRuntime, err := c.config.GetSandboxRuntime(sandboxConfig, sandbox.Metadata.RuntimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}
@@ -207,7 +208,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	log.G(ctx).Debugf("Container %q spec: %#+v", id, spew.NewFormatter(spec))
 
 	// Grab any platform specific snapshotter opts.
-	sOpts, err := snapshotterOpts(c.config.ContainerdConfig.Snapshotter, config)
+	sOpts, err := snapshotterOpts(config)
 	if err != nil {
 		return nil, err
 	}
@@ -260,18 +261,19 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		return nil, fmt.Errorf("failed to get container spec opts: %w", err)
 	}
 
-	containerLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, containerKindContainer)
+	containerLabels := buildLabels(config.Labels, image.ImageSpec.Config.Labels, crilabels.ContainerKindContainer)
 
-	sandboxInfo, err := c.client.SandboxStore().Get(ctx, sandboxID)
+	// TODO the sandbox in the cache should hold this info
+	runtimeName, runtimeOption, err := c.runtimeInfo(ctx, sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get sandbox %q metdata: %w", sandboxID, err)
+		return nil, fmt.Errorf("unable to get sandbox %q runtime info: %w", sandboxID, err)
 	}
 
 	opts = append(opts,
 		containerd.WithSpec(spec, specOpts...),
-		containerd.WithRuntime(sandboxInfo.Runtime.Name, sandboxInfo.Runtime.Options),
+		containerd.WithRuntime(runtimeName, runtimeOption),
 		containerd.WithContainerLabels(containerLabels),
-		containerd.WithContainerExtension(containerMetadataExtension, &meta),
+		containerd.WithContainerExtension(crilabels.ContainerMetadataExtension, &meta),
 	)
 
 	opts = append(opts, containerd.WithSandbox(sandboxID))
@@ -392,9 +394,9 @@ func (c *criService) runtimeSpec(id string, platform platforms.Platform, baseSpe
 	container := &containers.Container{ID: id}
 
 	if baseSpecFile != "" {
-		baseSpec, ok := c.baseOCISpecs[baseSpecFile]
-		if !ok {
-			return nil, fmt.Errorf("can't find base OCI spec %q", baseSpecFile)
+		baseSpec, err := c.LoadOCISpec(baseSpecFile)
+		if err != nil {
+			return nil, fmt.Errorf("can't load base OCI spec %q: %w", baseSpecFile, err)
 		}
 
 		spec := oci.Spec{}
@@ -1053,4 +1055,17 @@ func (c *criService) linuxContainerMounts(sandboxID string, config *runtime.Cont
 		})
 	}
 	return mounts
+}
+
+func (c *criService) runtimeInfo(ctx context.Context, id string) (string, typeurl.Any, error) {
+	sandboxInfo, err := c.client.SandboxStore().Get(ctx, id)
+	if err == nil {
+		return sandboxInfo.Runtime.Name, sandboxInfo.Runtime.Options, nil
+	}
+	sandboxContainer, legacyErr := c.client.ContainerService().Get(ctx, id)
+	if legacyErr == nil {
+		return sandboxContainer.Runtime.Name, sandboxContainer.Runtime.Options, nil
+	}
+
+	return "", nil, err
 }

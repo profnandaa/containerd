@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,13 +30,12 @@ import (
 	"time"
 
 	apitask "github.com/containerd/containerd/v2/api/runtime/task/v3"
+	"github.com/containerd/containerd/v2/core/runtime/v2/shim"
 	"github.com/containerd/containerd/v2/integration/images"
-	"github.com/containerd/containerd/v2/namespaces"
-	"github.com/containerd/containerd/v2/runtime/v2/shim"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	exec "golang.org/x/sys/execabs"
 )
 
 // TestIssue7496 is used to reproduce https://github.com/containerd/containerd/issues/7496

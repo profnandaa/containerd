@@ -23,21 +23,22 @@ import (
 	"sync"
 	"time"
 
-	eventtypes "github.com/containerd/containerd/v2/api/events"
-	apitasks "github.com/containerd/containerd/v2/api/services/tasks/v1"
-	containerdio "github.com/containerd/containerd/v2/cio"
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/errdefs"
-	"github.com/containerd/containerd/v2/events"
-	"github.com/containerd/containerd/v2/pkg/cri/constants"
-	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
-	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
-	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
-	"github.com/containerd/containerd/v2/protobuf"
 	"github.com/containerd/log"
 	"github.com/containerd/typeurl/v2"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/utils/clock"
+
+	eventtypes "github.com/containerd/containerd/v2/api/events"
+	apitasks "github.com/containerd/containerd/v2/api/services/tasks/v1"
+	containerd "github.com/containerd/containerd/v2/client"
+	containerdio "github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/cri/constants"
+	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
+	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
+	ctrdutil "github.com/containerd/containerd/v2/pkg/cri/util"
+	"github.com/containerd/containerd/v2/pkg/events"
+	"github.com/containerd/containerd/v2/protobuf"
+	"github.com/containerd/errdefs"
 )
 
 const (
@@ -108,7 +109,7 @@ func (em *eventMonitor) subscribe(subscriber events.Subscriber) {
 }
 
 // startSandboxExitMonitor starts an exit monitor for a given sandbox.
-func (em *eventMonitor) startSandboxExitMonitor(ctx context.Context, id string, pid uint32, exitCh <-chan containerd.ExitStatus) <-chan struct{} {
+func (em *eventMonitor) startSandboxExitMonitor(ctx context.Context, id string, exitCh <-chan containerd.ExitStatus) <-chan struct{} {
 	stopCh := make(chan struct{})
 	go func() {
 		defer close(stopCh)
@@ -361,6 +362,7 @@ func (em *eventMonitor) handleEvent(any interface{}) error {
 		if err != nil {
 			return fmt.Errorf("failed to update container status for TaskOOM event: %w", err)
 		}
+	// TODO: ImageService should handle these events directly
 	case *eventtypes.ImageCreate:
 		log.L.Infof("ImageCreate event %+v", e)
 		return em.c.UpdateImage(ctx, e.Name)

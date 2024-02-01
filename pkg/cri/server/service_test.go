@@ -17,29 +17,93 @@
 package server
 
 import (
-	"encoding/json"
-	"os"
-	"testing"
+	"context"
 
-	"github.com/containerd/containerd/v2/oci"
 	"github.com/containerd/go-cni"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
+	"github.com/containerd/containerd/v2/api/types"
+	"github.com/containerd/containerd/v2/core/sandbox"
+	"github.com/containerd/containerd/v2/internal/registrar"
 	criconfig "github.com/containerd/containerd/v2/pkg/cri/config"
 	containerstore "github.com/containerd/containerd/v2/pkg/cri/store/container"
 	"github.com/containerd/containerd/v2/pkg/cri/store/label"
 	sandboxstore "github.com/containerd/containerd/v2/pkg/cri/store/sandbox"
 	servertesting "github.com/containerd/containerd/v2/pkg/cri/testing"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	ostesting "github.com/containerd/containerd/v2/pkg/os/testing"
-	"github.com/containerd/containerd/v2/pkg/registrar"
+	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 )
 
+type fakeSandboxService struct{}
+
+func (f *fakeSandboxService) SandboxController(config *runtime.PodSandboxConfig, runtimeHandler string) (sandbox.Controller, error) {
+	return &fakeSandboxController{}, nil
+}
+
+type fakeSandboxController struct{}
+
+func (f fakeSandboxController) Create(_ctx context.Context, _sandboxInfo sandbox.Sandbox, _opts ...sandbox.CreateOpt) error {
+	return errdefs.ErrNotImplemented
+}
+
+func (f fakeSandboxController) Start(ctx context.Context, sandboxID string) (sandbox.ControllerInstance, error) {
+	return sandbox.ControllerInstance{}, errdefs.ErrNotImplemented
+}
+
+func (f fakeSandboxController) Platform(_ctx context.Context, _sandboxID string) (platforms.Platform, error) {
+	return platforms.DefaultSpec(), nil
+}
+
+func (f fakeSandboxController) Stop(_ctx context.Context, _sandboxID string, _opts ...sandbox.StopOpt) error {
+	return errdefs.ErrNotImplemented
+}
+
+func (f fakeSandboxController) Wait(_ctx context.Context, _sandboxID string) (sandbox.ExitStatus, error) {
+	return sandbox.ExitStatus{}, errdefs.ErrNotImplemented
+}
+
+func (f fakeSandboxController) Status(_ctx context.Context, sandboxID string, _verbose bool) (sandbox.ControllerStatus, error) {
+	return sandbox.ControllerStatus{}, errdefs.ErrNotImplemented
+}
+
+func (f fakeSandboxController) Shutdown(ctx context.Context, sandboxID string) error {
+	return errdefs.ErrNotImplemented
+}
+
+func (f fakeSandboxController) Metrics(ctx context.Context, sandboxID string) (*types.Metric, error) {
+	return &types.Metric{}, errdefs.ErrNotImplemented
+}
+
+type fakeRuntimeService struct {
+	ocispecs map[string]*oci.Spec
+}
+
+func (f fakeRuntimeService) Config() criconfig.Config {
+	return testConfig
+}
+
+func (f fakeRuntimeService) LoadOCISpec(filename string) (*oci.Spec, error) {
+	spec, ok := f.ocispecs[filename]
+	if !ok {
+		return nil, errdefs.ErrNotFound
+	}
+	return spec, nil
+}
+
+type testOpt func(*criService)
+
+func withRuntimeService(rs RuntimeService) testOpt {
+	return func(service *criService) {
+		service.RuntimeService = rs
+	}
+}
+
 // newTestCRIService creates a fake criService for test.
-func newTestCRIService() *criService {
+func newTestCRIService(opts ...testOpt) *criService {
 	labels := label.NewStore()
-	return &criService{
-		imageService:       &fakeImageService{},
+	service := &criService{
 		config:             testConfig,
 		os:                 ostesting.NewFakeOS(),
 		sandboxStore:       sandboxstore.NewStore(labels),
@@ -49,36 +113,17 @@ func newTestCRIService() *criService {
 		netPlugin: map[string]cni.CNI{
 			defaultNetworkPlugin: servertesting.NewFakeCNIPlugin(),
 		},
+		sandboxService: &fakeSandboxService{},
 	}
-}
-
-func TestLoadBaseOCISpec(t *testing.T) {
-	spec := oci.Spec{Version: "1.0.2", Hostname: "default"}
-
-	file, err := os.CreateTemp("", "spec-test-")
-	require.NoError(t, err)
-
-	defer func() {
-		assert.NoError(t, file.Close())
-		assert.NoError(t, os.RemoveAll(file.Name()))
-	}()
-
-	err = json.NewEncoder(file).Encode(&spec)
-	assert.NoError(t, err)
-
-	config := criconfig.Config{}
-	config.Runtimes = map[string]criconfig.Runtime{
-		"runc": {BaseRuntimeSpec: file.Name()},
+	for _, opt := range opts {
+		opt(service)
+	}
+	if service.RuntimeService == nil {
+		service.RuntimeService = &fakeRuntimeService{}
+	}
+	if service.ImageService == nil {
+		service.ImageService = &fakeImageService{}
 	}
 
-	specs, err := loadBaseOCISpecs(&config)
-	assert.NoError(t, err)
-
-	assert.Len(t, specs, 1)
-
-	out, ok := specs[file.Name()]
-	assert.True(t, ok, "expected spec with file name %q", file.Name())
-
-	assert.Equal(t, "1.0.2", out.Version)
-	assert.Equal(t, "default", out.Hostname)
+	return service
 }

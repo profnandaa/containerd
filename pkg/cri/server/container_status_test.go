@@ -247,7 +247,7 @@ func TestContainerStatus(t *testing.T) {
 			if test.imageExist {
 				imageStore, err := imagestore.NewFakeStore([]imagestore.Image{*image})
 				assert.NoError(t, err)
-				c.imageService = &fakeImageService{imageStore: imageStore}
+				c.ImageService = &fakeImageService{imageStore: imageStore}
 			}
 			resp, err := c.ContainerStatus(context.Background(), &runtime.ContainerStatusRequest{ContainerId: container.ID})
 			if test.expectErr {
@@ -266,7 +266,6 @@ func TestContainerStatus(t *testing.T) {
 }
 
 type fakeImageService struct {
-	runtime.ImageServiceServer
 	imageStore *imagestore.Store
 }
 
@@ -276,6 +275,8 @@ func (s *fakeImageService) RuntimeSnapshotter(ctx context.Context, ociRuntime cr
 
 func (s *fakeImageService) UpdateImage(ctx context.Context, r string) error { return nil }
 
+func (s *fakeImageService) CheckImages(ctx context.Context) error { return nil }
+
 func (s *fakeImageService) GetImage(id string) (imagestore.Image, error) { return s.imageStore.Get(id) }
 
 func (s *fakeImageService) GetSnapshot(key, snapshotter string) (snapshotstore.Snapshot, error) {
@@ -284,6 +285,12 @@ func (s *fakeImageService) GetSnapshot(key, snapshotter string) (snapshotstore.S
 
 func (s *fakeImageService) LocalResolve(refOrID string) (imagestore.Image, error) {
 	return imagestore.Image{}, errors.New("not implemented")
+}
+
+func (s *fakeImageService) ImageFSPaths() map[string]string { return make(map[string]string) }
+
+func (s *fakeImageService) PullImage(context.Context, string, func(string) (string, string, error), *runtime.PodSandboxConfig) (string, error) {
+	return "", errors.New("not implemented")
 }
 
 func patchExceptedWithState(expected *runtime.ContainerStatus, state runtime.ContainerState) {
