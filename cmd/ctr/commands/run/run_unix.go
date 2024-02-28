@@ -19,7 +19,6 @@
 package run
 
 import (
-	"context"
 	gocontext "context"
 	"errors"
 	"fmt"
@@ -40,43 +39,43 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/intel/goresctrl/pkg/blockio"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
 	"tags.cncf.io/container-device-interface/pkg/parser"
 )
 
 var platformRunFlags = []cli.Flag{
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "uidmap",
 		Usage: "Run inside a user namespace with the specified UID mapping range; specified with the format `container-uid:host-uid:length`",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "gidmap",
 		Usage: "Run inside a user namespace with the specified GID mapping range; specified with the format `container-gid:host-gid:length`",
 	},
-	cli.BoolFlag{
+	&cli.BoolFlag{
 		Name:  "remap-labels",
 		Usage: "Provide the user namespace ID remapping to the snapshotter via label options; requires snapshotter support",
 	},
-	cli.BoolFlag{
+	&cli.BoolFlag{
 		Name:  "privileged-without-host-devices",
 		Usage: "Don't pass all host devices to privileged container",
 	},
-	cli.Float64Flag{
+	&cli.Float64Flag{
 		Name:  "cpus",
 		Usage: "Set the CFS cpu quota",
 		Value: 0.0,
 	},
-	cli.IntFlag{
+	&cli.IntFlag{
 		Name:  "cpu-shares",
 		Usage: "Set the cpu shares",
 		Value: 1024,
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "cpuset-cpus",
 		Usage: "Set the CPUs the container will run in (e.g., 1-2,4)",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "cpuset-mems",
 		Usage: "Set the memory nodes the container will run in (e.g., 1-2,4)",
 	},
@@ -111,7 +110,7 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 		var (
 			ref = context.Args().First()
 			// for container's id is Args[1]
-			args = context.Args()[2:]
+			args = context.Args().Slice()[2:]
 		)
 		opts = append(opts, oci.WithDefaultSpec(), oci.WithDefaultUnixDevices)
 		if ef := context.String("env-file"); ef != "" {
@@ -465,7 +464,7 @@ func getNetNSPath(_ gocontext.Context, task containerd.Task) (string, error) {
 // This is used from the `run` command to avoid creating a registry with auto-refresh enabled.
 // It also provides a way to override the CDI spec file paths if required.
 func withStaticCDIRegistry() oci.SpecOpts {
-	return func(ctx context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+	return func(ctx gocontext.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
 		registry := cdi.GetRegistry(cdi.WithAutoRefresh(false))
 		if err := registry.Refresh(); err != nil {
 			// We don't consider registry refresh failure a fatal error.

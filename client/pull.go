@@ -28,8 +28,8 @@ import (
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/remotes/docker/schema1" //nolint:staticcheck // Ignore SA1019. Need to keep deprecated package for compatibility.
+	"github.com/containerd/containerd/v2/core/unpack"
 	"github.com/containerd/containerd/v2/pkg/tracing"
-	"github.com/containerd/containerd/v2/pkg/unpack"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 )
@@ -197,7 +197,10 @@ func (c *Client) fetch(ctx context.Context, rCtx *RemoteContext, ref string, lim
 	)
 
 	if desc.MediaType == images.MediaTypeDockerSchema1Manifest && rCtx.ConvertSchema1 {
-		schema1Converter := schema1.NewConverter(store, fetcher)
+		schema1Converter, err := schema1.NewConverter(store, fetcher)
+		if err != nil {
+			return images.Image{}, fmt.Errorf("failed to get converter for %q: %w", ref, err)
+		}
 
 		handler = images.Handlers(append(rCtx.BaseHandlers, schema1Converter)...)
 

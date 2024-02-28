@@ -25,12 +25,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/containerd/containerd/v2/version"
 	"github.com/containerd/log/logtest"
 )
 
 func TestMigrations(t *testing.T) {
-	if len(migrations) != CurrentConfigVersion {
-		t.Fatalf("Migration missing, expected %d migrations, only %d defined", CurrentConfigVersion, len(migrations))
+	if len(migrations) != version.ConfigVersion {
+		t.Fatalf("Migration missing, expected %d migrations, only %d defined", version.ConfigVersion, len(migrations))
 	}
 }
 
@@ -103,6 +104,17 @@ func TestResolveImports(t *testing.T) {
 		filepath.Join(tempDir, "config_2.toml"),
 		filepath.Join(tempDir, "test.toml"),
 		filepath.Join(tempDir, "current.toml"),
+	})
+
+	t.Run("GlobRelativePath", func(t *testing.T) {
+		imports, err := resolveImports(filepath.Join(tempDir, "root.toml"), []string{
+			"config_*.toml", // Glob files from working dir
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, imports, []string{
+			filepath.Join(tempDir, "config_1.toml"),
+			filepath.Join(tempDir, "config_2.toml"),
+		})
 	})
 }
 

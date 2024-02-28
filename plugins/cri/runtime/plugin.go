@@ -24,20 +24,18 @@ import (
 	"os"
 	"path/filepath"
 
-	introspectionapi "github.com/containerd/containerd/v2/api/services/introspection/v1"
 	"github.com/containerd/log"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"k8s.io/klog/v2"
 
-	srvconfig "github.com/containerd/containerd/v2/cmd/containerd/server/config"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	"github.com/containerd/containerd/v2/internal/cri/constants"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/plugins"
-	"github.com/containerd/containerd/v2/plugins/services"
 	"github.com/containerd/containerd/v2/plugins/services/warning"
+	"github.com/containerd/containerd/v2/version"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 )
@@ -52,10 +50,9 @@ func init() {
 		Config: &config,
 		Requires: []plugin.Type{
 			plugins.WarningPlugin,
-			plugins.ServicePlugin,
 		},
-		ConfigMigration: func(ctx context.Context, version int, pluginConfigs map[string]interface{}) error {
-			if version >= srvconfig.CurrentConfigVersion {
+		ConfigMigration: func(ctx context.Context, configVersion int, pluginConfigs map[string]interface{}) error {
+			if configVersion >= version.ConfigVersion {
 				return nil
 			}
 			c, ok := pluginConfigs[string(plugins.GRPCPlugin)+".cri"]
@@ -76,18 +73,7 @@ func initCRIRuntime(ic *plugin.InitContext) (interface{}, error) {
 	ic.Meta.Exports = map[string]string{"CRIVersion": constants.CRIVersion}
 	ctx := ic.Context
 	pluginConfig := ic.Config.(*criconfig.RuntimeConfig)
-
-	introspectionService, err := ic.GetByID(plugins.ServicePlugin, services.IntrospectionService)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get plugin (%q, %q): %w",
-			plugins.ServicePlugin, services.IntrospectionService, err)
-	}
-	introspectionClient, ok := introspectionService.(introspectionapi.IntrospectionClient)
-	if !ok {
-		return nil, fmt.Errorf("%+v does not implement IntrospectionClient interfae", introspectionService)
-	}
-
-	if warnings, err := criconfig.ValidateRuntimeConfig(ctx, pluginConfig, introspectionClient); err != nil {
+	if warnings, err := criconfig.ValidateRuntimeConfig(ctx, pluginConfig); err != nil {
 		return nil, fmt.Errorf("invalid plugin config: %w", err)
 	} else if len(warnings) > 0 {
 		ws, err := ic.GetSingle(plugins.WarningPlugin)

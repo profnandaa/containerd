@@ -167,6 +167,14 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}
+	var runtimeHandler *runtime.RuntimeHandler
+	for _, f := range c.runtimeHandlers {
+		f := f
+		if f.Name == sandbox.Metadata.RuntimeHandler {
+			runtimeHandler = f
+			break
+		}
+	}
 	log.G(ctx).Debugf("Use OCI runtime %+v for sandbox %q and container %q", ociRuntime, sandboxID, id)
 
 	spec, err := c.buildContainerSpec(
@@ -182,6 +190,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		&image.ImageSpec.Config,
 		volumeMounts,
 		ociRuntime,
+		runtimeHandler,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate container %q spec: %w", id, err)
@@ -530,6 +539,7 @@ func (c *criService) buildContainerSpec(
 	imageConfig *imagespec.ImageConfig,
 	extraMounts []*runtime.Mount,
 	ociRuntime criconfig.Runtime,
+	runtimeHandler *runtime.RuntimeHandler,
 ) (_ *runtimespec.Spec, retErr error) {
 	var (
 		specOpts []oci.SpecOpts
@@ -559,6 +569,7 @@ func (c *criService) buildContainerSpec(
 			imageConfig,
 			append(linuxMounts, extraMounts...),
 			ociRuntime,
+			runtimeHandler,
 		)
 	case isWindows:
 		specOpts, err = c.buildWindowsSpec(
@@ -573,6 +584,7 @@ func (c *criService) buildContainerSpec(
 			imageConfig,
 			extraMounts,
 			ociRuntime,
+			runtimeHandler,
 		)
 	case isDarwin:
 		specOpts, err = c.buildDarwinSpec(
@@ -585,6 +597,7 @@ func (c *criService) buildContainerSpec(
 			imageConfig,
 			extraMounts,
 			ociRuntime,
+			runtimeHandler,
 		)
 	default:
 		return nil, fmt.Errorf("unsupported spec platform: %s", platform.OS)
@@ -609,6 +622,7 @@ func (c *criService) buildLinuxSpec(
 	imageConfig *imagespec.ImageConfig,
 	extraMounts []*runtime.Mount,
 	ociRuntime criconfig.Runtime,
+	runtimeHandler *runtime.RuntimeHandler,
 ) (_ []oci.SpecOpts, retErr error) {
 	specOpts := []oci.SpecOpts{
 		oci.WithoutRunMount,
@@ -683,9 +697,7 @@ func (c *criService) buildLinuxSpec(
 		}
 	}()
 
-	specOpts = append(specOpts, customopts.WithMounts(c.os, config, extraMounts, mountLabel, &customopts.RuntimeConfig{
-		TreatRoMountsAsRro: ociRuntime.TreatRoMountsAsRroResolved,
-	}))
+	specOpts = append(specOpts, customopts.WithMounts(c.os, config, extraMounts, mountLabel, runtimeHandler))
 
 	if !c.config.DisableProcMount {
 		// Change the default masked/readonly paths to empty slices
@@ -843,6 +855,7 @@ func (c *criService) buildWindowsSpec(
 	imageConfig *imagespec.ImageConfig,
 	extraMounts []*runtime.Mount,
 	ociRuntime criconfig.Runtime,
+	runtimeHandler *runtime.RuntimeHandler,
 ) (_ []oci.SpecOpts, retErr error) {
 	var specOpts []oci.SpecOpts
 	specOpts = append(specOpts, customopts.WithProcessCommandLineOrArgsForWindows(config, imageConfig))
@@ -937,6 +950,7 @@ func (c *criService) buildDarwinSpec(
 	imageConfig *imagespec.ImageConfig,
 	extraMounts []*runtime.Mount,
 	ociRuntime criconfig.Runtime,
+	runtimeHandler *runtime.RuntimeHandler,
 ) (_ []oci.SpecOpts, retErr error) {
 	specOpts := []oci.SpecOpts{
 		customopts.WithProcessArgs(config, imageConfig),
@@ -1010,27 +1024,37 @@ func (c *criService) linuxContainerMounts(sandboxID string, config *runtime.Cont
 	}
 
 	if !isInCRIMounts(etcHosts, config.GetMounts()) {
-		mounts = append(mounts, &runtime.Mount{
-			ContainerPath:  etcHosts,
-			HostPath:       c.getSandboxHosts(sandboxID),
-			Readonly:       securityContext.GetReadonlyRootfs(),
-			SelinuxRelabel: true,
-			UidMappings:    uidMappings,
-			GidMappings:    gidMappings,
-		})
+		hostpath := c.getSandboxHosts(sandboxID)
+		// /etc/hosts could be delegated to remote sandbox controller. That file isn't required to be existed
+		// in host side for some sandbox runtimes. Skip it if we don't need it.
+		if _, err := c.os.Stat(hostpath); err == nil {
+			mounts = append(mounts, &runtime.Mount{
+				ContainerPath:  etcHosts,
+				HostPath:       hostpath,
+				Readonly:       securityContext.GetReadonlyRootfs(),
+				SelinuxRelabel: true,
+				UidMappings:    uidMappings,
+				GidMappings:    gidMappings,
+			})
+		}
 	}
 
 	// Mount sandbox resolv.config.
 	// TODO: Need to figure out whether we should always mount it as read-only
 	if !isInCRIMounts(resolvConfPath, config.GetMounts()) {
-		mounts = append(mounts, &runtime.Mount{
-			ContainerPath:  resolvConfPath,
-			HostPath:       c.getResolvPath(sandboxID),
-			Readonly:       securityContext.GetReadonlyRootfs(),
-			SelinuxRelabel: true,
-			UidMappings:    uidMappings,
-			GidMappings:    gidMappings,
-		})
+		hostpath := c.getResolvPath(sandboxID)
+		// The ownership of /etc/resolv.conf could be delegated to remote sandbox controller. That file isn't
+		// required to be existed in host side for some sandbox runtimes. Skip it if we don't need it.
+		if _, err := c.os.Stat(hostpath); err == nil {
+			mounts = append(mounts, &runtime.Mount{
+				ContainerPath:  resolvConfPath,
+				HostPath:       hostpath,
+				Readonly:       securityContext.GetReadonlyRootfs(),
+				SelinuxRelabel: true,
+				UidMappings:    uidMappings,
+				GidMappings:    gidMappings,
+			})
+		}
 	}
 
 	if !isInCRIMounts(devShm, config.GetMounts()) {
@@ -1038,23 +1062,27 @@ func (c *criService) linuxContainerMounts(sandboxID string, config *runtime.Cont
 		if securityContext.GetNamespaceOptions().GetIpc() == runtime.NamespaceMode_NODE {
 			sandboxDevShm = devShm
 		}
-		mounts = append(mounts, &runtime.Mount{
-			ContainerPath:  devShm,
-			HostPath:       sandboxDevShm,
-			Readonly:       false,
-			SelinuxRelabel: sandboxDevShm != devShm,
-			// XXX: tmpfs support for idmap mounts got merged in
-			// Linux 6.3.
-			// Our Ubuntu 22.04 CI runs with 5.15 kernels, so
-			// disabling idmap mounts for this case makes the CI
-			// happy (the other fs used support idmap mounts in 5.15
-			// kernels).
-			// We can enable this at a later stage, but as this
-			// tmpfs mount is exposed empty to the container (no
-			// prepopulated files) and using the hostIPC with userns
-			// is blocked by k8s, we can just avoid using the
-			// mappings and it should work fine.
-		})
+		// The ownership of /dev/shm could be delegated to remote sandbox controller. That file isn't required
+		// to be existed in host side for some sandbox runtimes. Skip it if we don't need it.
+		if _, err := c.os.Stat(sandboxDevShm); err == nil {
+			mounts = append(mounts, &runtime.Mount{
+				ContainerPath:  devShm,
+				HostPath:       sandboxDevShm,
+				Readonly:       false,
+				SelinuxRelabel: sandboxDevShm != devShm,
+				// XXX: tmpfs support for idmap mounts got merged in
+				// Linux 6.3.
+				// Our Ubuntu 22.04 CI runs with 5.15 kernels, so
+				// disabling idmap mounts for this case makes the CI
+				// happy (the other fs used support idmap mounts in 5.15
+				// kernels).
+				// We can enable this at a later stage, but as this
+				// tmpfs mount is exposed empty to the container (no
+				// prepopulated files) and using the hostIPC with userns
+				// is blocked by k8s, we can just avoid using the
+				// mappings and it should work fine.
+			})
+		}
 	}
 	return mounts
 }

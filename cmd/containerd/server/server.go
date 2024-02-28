@@ -37,9 +37,9 @@ import (
 	"github.com/containerd/log"
 	"github.com/containerd/ttrpc"
 	"github.com/docker/go-metrics"
-	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -64,6 +64,7 @@ import (
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/containerd/v2/plugins/services/warning"
+	"github.com/containerd/containerd/v2/version"
 	"github.com/containerd/platforms"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/dynamic"
@@ -112,10 +113,10 @@ func CreateTopLevelDirectories(config *srvconfig.Config) error {
 // New creates and initializes a new containerd server
 func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 	var (
-		version    = config.Version
-		migrationT time.Duration
+		currentVersion = config.Version
+		migrationT     time.Duration
 	)
-	if version < srvconfig.CurrentConfigVersion {
+	if currentVersion < version.ConfigVersion {
 		// Migrate config to latest version
 		t1 := time.Now()
 		err := config.MigrateConfig(ctx)
@@ -143,16 +144,25 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		diff.RegisterProcessor(diff.BinaryHandler(id, p.Returns, p.Accepts, p.Path, p.Args, p.Env))
 	}
 
+	var prometheusServerMetricsOpts []grpc_prometheus.ServerMetricsOption
+	if config.Metrics.GRPCHistogram {
+		// Enable grpc time histograms to measure rpc latencies
+		prometheusServerMetricsOpts = append(prometheusServerMetricsOpts, grpc_prometheus.WithServerHandlingTimeHistogram())
+	}
+
+	prometheusServerMetrics := grpc_prometheus.NewServerMetrics(prometheusServerMetricsOpts...)
+	prometheus.MustRegister(prometheusServerMetrics)
+
 	serverOpts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
-			grpc_prometheus.StreamServerInterceptor,
+		grpc.ChainStreamInterceptor(
 			streamNamespaceInterceptor,
-		)),
-		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-			grpc_prometheus.UnaryServerInterceptor,
+			prometheusServerMetrics.StreamServerInterceptor(),
+		),
+		grpc.ChainUnaryInterceptor(
 			unaryNamespaceInterceptor,
-		)),
+			prometheusServerMetrics.UnaryServerInterceptor(),
+		),
 	}
 	if config.GRPC.MaxRecvMsgSize > 0 {
 		serverOpts = append(serverOpts, grpc.MaxRecvMsgSize(config.GRPC.MaxRecvMsgSize))
@@ -212,10 +222,11 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		ttrpcServices []ttrpcService
 
 		s = &Server{
-			grpcServer:  grpcServer,
-			tcpServer:   tcpServer,
-			ttrpcServer: ttrpcServer,
-			config:      config,
+			prometheusServerMetrics: prometheusServerMetrics,
+			grpcServer:              grpcServer,
+			tcpServer:               tcpServer,
+			ttrpcServer:             ttrpcServer,
+			config:                  config,
 		}
 		initialized = plugin.NewPluginSet()
 		required    = make(map[string]struct{})
@@ -224,12 +235,12 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		required[r] = struct{}{}
 	}
 
-	if version < srvconfig.CurrentConfigVersion {
+	if currentVersion < version.ConfigVersion {
 		t1 := time.Now()
 		// Run migration for each configuration version
 		// Run each plugin migration for each version to ensure that migration logic is simple and
 		// focused on upgrading from one version at a time.
-		for v := version; v < srvconfig.CurrentConfigVersion; v++ {
+		for v := currentVersion; v < version.ConfigVersion; v++ {
 			for _, p := range loaded {
 				if p.ConfigMigration != nil {
 					if err := p.ConfigMigration(ctx, v, config.Plugins); err != nil {
@@ -241,7 +252,7 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		migrationT = migrationT + time.Since(t1)
 	}
 	if migrationT > 0 {
-		log.G(ctx).WithField("t", migrationT).Warnf("Configuration migrated from version %d, use `containerd config migrate` to avoid migration", version)
+		log.G(ctx).WithField("t", migrationT).Warnf("Configuration migrated from version %d, use `containerd config migrate` to avoid migration", currentVersion)
 	}
 
 	for _, p := range loaded {
@@ -363,24 +374,18 @@ func recordConfigDeprecations(ctx context.Context, config *srvconfig.Config, set
 
 // Server is the containerd main daemon
 type Server struct {
-	grpcServer  *grpc.Server
-	ttrpcServer *ttrpc.Server
-	tcpServer   *grpc.Server
-	config      *srvconfig.Config
-	plugins     []*plugin.Plugin
-	ready       sync.WaitGroup
+	prometheusServerMetrics *grpc_prometheus.ServerMetrics
+	grpcServer              *grpc.Server
+	ttrpcServer             *ttrpc.Server
+	tcpServer               *grpc.Server
+	config                  *srvconfig.Config
+	plugins                 []*plugin.Plugin
+	ready                   sync.WaitGroup
 }
 
 // ServeGRPC provides the containerd grpc APIs on the provided listener
 func (s *Server) ServeGRPC(l net.Listener) error {
-	if s.config.Metrics.GRPCHistogram {
-		// enable grpc time histograms to measure rpc latencies
-		grpc_prometheus.EnableHandlingTimeHistogram()
-	}
-	// before we start serving the grpc API register the grpc_prometheus metrics
-	// handler.  This needs to be the last service registered so that it can collect
-	// metrics for every other service
-	grpc_prometheus.Register(s.grpcServer)
+	s.prometheusServerMetrics.InitializeMetrics(s.grpcServer)
 	return trapClosedConnErr(s.grpcServer.Serve(l))
 }
 
@@ -402,7 +407,7 @@ func (s *Server) ServeMetrics(l net.Listener) error {
 
 // ServeTCP allows services to serve over tcp
 func (s *Server) ServeTCP(l net.Listener) error {
-	grpc_prometheus.Register(s.tcpServer)
+	s.prometheusServerMetrics.InitializeMetrics(s.tcpServer)
 	return trapClosedConnErr(s.tcpServer.Serve(l))
 }
 

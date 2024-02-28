@@ -38,7 +38,6 @@ import (
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
-	eventstypes "github.com/containerd/containerd/v2/api/events"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/diff"
 	containerdimages "github.com/containerd/containerd/v2/core/images"
@@ -109,15 +108,14 @@ func (c *GRPCCRIImageService) PullImage(ctx context.Context, r *runtime.PullImag
 		return ParseAuth(hostauth, host)
 	}
 
-	ref, err := c.CRIImageService.PullImage(ctx, imageRef, credentials, r.SandboxConfig)
+	ref, err := c.CRIImageService.PullImage(ctx, imageRef, credentials, r.SandboxConfig, r.GetImage().GetRuntimeHandler())
 	if err != nil {
 		return nil, err
 	}
 	return &runtime.PullImageResponse{ImageRef: ref}, nil
 }
 
-func (c *CRIImageService) PullImage(ctx context.Context, name string, credentials func(string) (string, string, error), sandboxConfig *runtime.PodSandboxConfig) (_ string, err error) {
-
+func (c *CRIImageService) PullImage(ctx context.Context, name string, credentials func(string) (string, string, error), sandboxConfig *runtime.PodSandboxConfig, runtimeHandler string) (_ string, err error) {
 	span := tracing.SpanFromContext(ctx)
 	defer func() {
 		// TODO: add domain label for imagePulls metrics, and we may need to provide a mechanism
@@ -320,34 +318,30 @@ func (c *CRIImageService) createImageReference(ctx context.Context, name string,
 	// TODO(random-liu): Figure out which is the more performant sequence create then update or
 	// update then create.
 	// TODO: Call CRIImageService directly
-	oldImg, err := c.images.Create(ctx, img)
+	_, err := c.images.Create(ctx, img)
 	if err == nil {
-		if c.publisher != nil {
-			if err := c.publisher.Publish(ctx, "/images/create", &eventstypes.ImageCreate{
-				Name:   img.Name,
-				Labels: img.Labels,
-			}); err != nil {
-				return err
-			}
-		}
 		return nil
 	} else if !errdefs.IsAlreadyExists(err) {
 		return err
 	}
-	if oldImg.Target.Digest == img.Target.Digest && oldImg.Labels[crilabels.ImageLabelKey] == labels[crilabels.ImageLabelKey] {
+	// Retrieve oldImg from image store here because Create routine returns an
+	// empty image on ErrAlreadyExists
+	oldImg, err := c.images.Get(ctx, name)
+	if err != nil {
+		return err
+	}
+	fieldpaths := []string{"target"}
+	if oldImg.Labels[crilabels.ImageLabelKey] != labels[crilabels.ImageLabelKey] {
+		fieldpaths = append(fieldpaths, "labels."+crilabels.ImageLabelKey)
+	}
+	if oldImg.Labels[crilabels.PinnedImageLabelKey] != labels[crilabels.PinnedImageLabelKey] &&
+		labels[crilabels.PinnedImageLabelKey] == crilabels.PinnedImageLabelValue {
+		fieldpaths = append(fieldpaths, "labels."+crilabels.PinnedImageLabelKey)
+	}
+	if oldImg.Target.Digest == img.Target.Digest && len(fieldpaths) < 2 {
 		return nil
 	}
-	_, err = c.images.Update(ctx, img, "target", "labels."+crilabels.ImageLabelKey)
-	if err == nil && c.publisher != nil {
-		if c.publisher != nil {
-			if err := c.publisher.Publish(ctx, "/images/update", &eventstypes.ImageUpdate{
-				Name:   img.Name,
-				Labels: img.Labels,
-			}); err != nil {
-				return err
-			}
-		}
-	}
+	_, err = c.images.Update(ctx, img, fieldpaths...)
 	return err
 }
 
@@ -379,7 +373,7 @@ func (c *CRIImageService) UpdateImage(ctx context.Context, r string) error {
 			return fmt.Errorf("get image id: %w", err)
 		}
 		id := configDesc.Digest.String()
-		labels := c.getLabels(ctx, id)
+		labels := c.getLabels(ctx, r)
 		if err := c.createImageReference(ctx, id, img.Target(), labels); err != nil {
 			return fmt.Errorf("create image id reference %q: %w", id, err)
 		}
@@ -775,6 +769,8 @@ func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, i
 		return snapshotter, nil
 	}
 
+	// TODO(kiashok): honor the new CRI runtime handler field added to v0.29.0
+	// for image pull per runtime class support.
 	runtimeHandler, ok := s.Annotations[annotations.RuntimeHandler]
 	if !ok {
 		return snapshotter, nil

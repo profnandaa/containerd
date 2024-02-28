@@ -22,15 +22,14 @@ import (
 	"path/filepath"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	srvconfig "github.com/containerd/containerd/v2/cmd/containerd/server/config"
 	"github.com/containerd/containerd/v2/core/metadata"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	"github.com/containerd/containerd/v2/internal/cri/constants"
 	"github.com/containerd/containerd/v2/internal/cri/server/images"
-	"github.com/containerd/containerd/v2/pkg/events"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/containerd/v2/plugins/services/warning"
+	"github.com/containerd/containerd/v2/version"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	"github.com/containerd/plugin"
@@ -46,7 +45,6 @@ func init() {
 		Config: &config,
 		Requires: []plugin.Type{
 			plugins.LeasePlugin,
-			plugins.EventPlugin,
 			plugins.MetadataPlugin,
 			plugins.SandboxStorePlugin,
 			plugins.ServicePlugin,  // For client
@@ -59,11 +57,6 @@ func init() {
 				return nil, err
 			}
 			mdb := m.(*metadata.DB)
-
-			ep, err := ic.GetSingle(plugins.EventPlugin)
-			if err != nil {
-				return nil, err
-			}
 
 			if warnings, err := criconfig.ValidateImageConfig(ic.Context, &config); err != nil {
 				return nil, fmt.Errorf("invalid cri image config: %w", err)
@@ -84,7 +77,6 @@ func init() {
 				RuntimePlatforms: map[string]images.ImagePlatform{},
 				Snapshotters:     map[string]snapshots.Snapshotter{},
 				ImageFSPaths:     map[string]string{},
-				Publisher:        ep.(events.Publisher),
 			}
 
 			options.Client, err = containerd.New(
@@ -162,8 +154,8 @@ func init() {
 	})
 }
 
-func configMigration(ctx context.Context, version int, pluginConfigs map[string]interface{}) error {
-	if version >= srvconfig.CurrentConfigVersion {
+func configMigration(ctx context.Context, configVersion int, pluginConfigs map[string]interface{}) error {
+	if configVersion >= version.ConfigVersion {
 		return nil
 	}
 	original, ok := pluginConfigs[string(plugins.GRPCPlugin)+".cri"]
